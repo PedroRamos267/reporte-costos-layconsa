@@ -3,7 +3,7 @@ services:
     name: reporte-costos
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn reporte_costos_web:server
+    startCommand: gunicorn reporte_costos_web:server --timeout 120
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
