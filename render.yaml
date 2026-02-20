@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: reporte-costos
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn reporte_costos_web:server
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
