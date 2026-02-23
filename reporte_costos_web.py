@@ -241,6 +241,7 @@ lista_pt_dd = df_resumen[["Código PT", "Descripción PT"]].drop_duplicates()
 
 
 def get_maquinas_inyeccion(codigo_pt):
+    """Máquinas de INYECCIÓN con T.Ciclo y Cav.Oper editables."""
     visitados = set()
     maquinas  = {}
 
@@ -272,6 +273,46 @@ def get_maquinas_inyeccion(codigo_pt):
 
     buscar(codigo_pt)
     return list(maquinas.values())
+
+
+def get_semis_otros_procesos(codigo_pt):
+    """Semis de otros procesos (ENSAMBLE, ENCAJADO, TROQUELADO, DOSIFICADO)
+    con Cantidad Base, T.MO, T.Maq, Cant.Opr editables."""
+    visitados  = set()
+    semis      = {}
+    excluidos  = ["INYEC", "MYT", "M&T", "MASAS"]
+
+    def buscar(codigo):
+        if codigo in visitados:
+            return
+        visitados.add(codigo)
+        hijos = df_exp[df_exp["Código Semi"] == codigo]
+        for _, row in hijos.iterrows():
+            comp    = str(row["Componente"])
+            familia = str(row.get("Familia", comp[:3])).strip()
+            t       = df_tie[df_tie["Código Semi"] == comp]
+            if not t.empty:
+                proc = str(t.iloc[0].get("Proceso", "")).strip().upper()
+                if not any(ex in proc for ex in excluidos) and proc != "SIN PROCESO":
+                    t_row = t.iloc[0]
+                    if comp not in semis:
+                        semis[comp] = {
+                            "Código Semi":  comp,
+                            "Descripción":  str(row.get("Descripción Componente", "")),
+                            "Proceso":      proc,
+                            "Maquina":      str(t_row.get("Maquina", "")),
+                            "Cantidad Base":float(t_row.get("Cantidad Base", 0) or 0),
+                            "T.MO":         float(t_row.get("T.MO",          0) or 0),
+                            "T.Maq":        float(t_row.get("T.Maq",         0) or 0),
+                            "Cant.Opr":     float(t_row.get("Cant.Opr",      0) or 0),
+                            "Tarifa Maq":   float(t_row.get("Tarifa Maquina",0) or 0),
+                            "Tarifa MO":    float(t_row.get("Tarifa MO",     0) or 0),
+                        }
+            if familia.startswith("231"):
+                buscar(comp)
+
+    buscar(codigo_pt)
+    return list(semis.values())
 
 
 app.layout = html.Div(
@@ -340,6 +381,40 @@ app.layout = html.Div(
             ]),
         ]),
 
+        # Simulador otros procesos
+        html.Div(style={"backgroundColor": COLORES["card"], "borderRadius": "12px",
+                        "padding": "15px", "marginBottom": "20px",
+                        "border": "1px solid #4CAF50"}, children=[
+            html.H3("⚙️ Simulador Otros Procesos — Modifica Cantidad Base, T.MO, T.Maq",
+                    style={"color": "#4CAF50", "fontSize": "16px",
+                           "marginTop": 0, "marginBottom": "10px"}),
+            html.P("Edita los valores y presiona Recalcular para ver el impacto.",
+                   style={"color": "#7A9BBF", "fontSize": "12px", "marginBottom": "10px"}),
+            dash_table.DataTable(
+                id="tabla-simulador-otros",
+                columns=[
+                    {"name": "Proceso",        "id": "Proceso",       "editable": False},
+                    {"name": "Máquina",         "id": "Maquina",       "editable": False},
+                    {"name": "Descripción",     "id": "Descripción",   "editable": False},
+                    {"name": "Cantidad Base",   "id": "Cantidad Base", "editable": True,  "type": "numeric"},
+                    {"name": "T.MO",            "id": "T.MO",          "editable": True,  "type": "numeric"},
+                    {"name": "T.Maq",           "id": "T.Maq",         "editable": True,  "type": "numeric"},
+                    {"name": "Cant.Opr",        "id": "Cant.Opr",      "editable": False},
+                    {"name": "Tarifa Maq",      "id": "Tarifa Maq",    "editable": False},
+                    {"name": "Tarifa MO",       "id": "Tarifa MO",     "editable": False},
+                ],
+                style_header={"backgroundColor": "#1F3864", "color": "white", "fontWeight": "bold"},
+                style_cell={"backgroundColor": "#1E2D3D", "color": COLORES["text"],
+                            "border": "1px solid #2A3F54", "padding": "8px", "textAlign": "center"},
+                style_data_conditional=[
+                    {"if": {"column_editable": True},
+                     "backgroundColor": "#0D2137", "border": "1px solid #4CAF50"},
+                    {"if": {"row_index": "odd"}, "backgroundColor": "#162030"},
+                ],
+                editable=True, page_action="none",
+            ),
+        ]),
+
         html.Div(style={"display": "grid", "gridTemplateColumns": "1fr 1fr",
                         "gap": "20px", "marginBottom": "20px"}, children=[
             html.Div(style={"backgroundColor": COLORES["card"],
@@ -356,11 +431,20 @@ app.layout = html.Div(
             ]),
         ]),
 
-        html.Div(style={"backgroundColor": COLORES["card"], "borderRadius": "12px",
-                        "padding": "15px", "marginBottom": "20px"}, children=[
-            html.H3("Costo Total por Proceso", style={"color": COLORES["accent"],
-                    "fontSize": "16px", "marginTop": 0}),
-            dcc.Graph(id="grafico-donut")
+        html.Div(style={"display": "grid", "gridTemplateColumns": "1fr 1fr",
+                        "gap": "20px", "marginBottom": "20px"}, children=[
+            html.Div(style={"backgroundColor": COLORES["card"],
+                            "borderRadius": "12px", "padding": "15px"}, children=[
+                html.H3("Costo por Proceso (%)", style={"color": COLORES["accent"],
+                        "fontSize": "16px", "marginTop": 0}),
+                dcc.Graph(id="grafico-donut")
+            ]),
+            html.Div(style={"backgroundColor": COLORES["card"],
+                            "borderRadius": "12px", "padding": "15px"}, children=[
+                html.H3("Costo por Proceso (S/)", style={"color": COLORES["accent"],
+                        "fontSize": "16px", "marginTop": 0}),
+                dcc.Graph(id="grafico-donut-soles")
+            ]),
         ]),
 
         html.Div(style={"backgroundColor": COLORES["card"], "borderRadius": "12px",
@@ -396,21 +480,37 @@ app.layout = html.Div(
 
 @app.callback(
     Output("tabla-simulador", "data"),
+    Output("tabla-simulador-otros", "data"),
     Input("selector-pt", "value"),
 )
-def cargar_simulador(codigo_pt):
+def cargar_simuladores(codigo_pt):
+    # Inyección
     maquinas = get_maquinas_inyeccion(codigo_pt)
-    rows     = []
+    rows_iny = []
     for m in maquinas:
-        cant_base = round((3600 / m["T.Ciclo"]) * m["Cav.Oper"] * 24, 2) \
-                    if m["T.Ciclo"] > 0 else 0
-        rows.append({
+        cant_base = round((3600 / m["T.Ciclo"]) * m["Cav.Oper"] * 24, 2)                     if m["T.Ciclo"] > 0 else 0
+        rows_iny.append({
             "Maquina":   m["Maquina"],   "T.Ciclo":   m["T.Ciclo"],
             "Cav.Oper":  m["Cav.Oper"],  "Cav.Tot":   m["Cav.Tot"],
             "Cant.Base": cant_base,       "Tarifa Maq":m["Tarifa Maq"],
             "Tarifa MO": m["Tarifa MO"],
         })
-    return rows
+    # Otros procesos
+    otros    = get_semis_otros_procesos(codigo_pt)
+    rows_otros = []
+    for s in otros:
+        rows_otros.append({
+            "Proceso":      s["Proceso"],
+            "Maquina":      s["Maquina"],
+            "Descripción":  s["Descripción"],
+            "Cantidad Base":s["Cantidad Base"],
+            "T.MO":         s["T.MO"],
+            "T.Maq":        s["T.Maq"],
+            "Cant.Opr":     s["Cant.Opr"],
+            "Tarifa Maq":   s["Tarifa Maq"],
+            "Tarifa MO":    s["Tarifa MO"],
+        })
+    return rows_iny, rows_otros
 
 
 @app.callback(
@@ -418,6 +518,7 @@ def cargar_simulador(codigo_pt):
     Output("grafico-cascada",     "figure"),
     Output("grafico-cascada-pct", "figure"),
     Output("grafico-donut",       "figure"),
+    Output("grafico-donut-soles", "figure"),
     Output("tabla-resumen",       "data"),
     Output("tabla-resumen",       "columns"),
     Output("tabla-detalle",       "data"),
@@ -426,9 +527,11 @@ def cargar_simulador(codigo_pt):
     Input("btn-recalcular",       "n_clicks"),
     Input("selector-pt",          "value"),
     State("tabla-simulador",      "data"),
+    State("tabla-simulador-otros","data"),
 )
-def actualizar(n_clicks, codigo_pt, datos_simulador):
+def actualizar(n_clicks, codigo_pt, datos_simulador, datos_otros):
     df_tie_sim = df_tie.copy()
+    # Aplicar cambios de inyección por máquina
     if datos_simulador:
         for row in datos_simulador:
             maquina  = str(row.get("Maquina", ""))
@@ -438,6 +541,18 @@ def actualizar(n_clicks, codigo_pt, datos_simulador):
                 nueva_base = (3600 / t_ciclo) * cav_oper * 24
                 mask = df_tie_sim["Maquina"].astype(str).str.strip() == maquina
                 df_tie_sim.loc[mask, "Cantidad Base"] = nueva_base
+    # Aplicar cambios de otros procesos por semi
+    if datos_otros:
+        for row in datos_otros:
+            codigo     = str(row.get("Código Semi", ""))
+            nueva_base = float(row.get("Cantidad Base", 0) or 0)
+            nuevo_tmo  = float(row.get("T.MO",         0) or 0)
+            nuevo_tmaq = float(row.get("T.Maq",        0) or 0)
+            if codigo and nueva_base > 0:
+                mask = df_tie_sim["Código Semi"] == codigo
+                df_tie_sim.loc[mask, "Cantidad Base"] = nueva_base
+                if nuevo_tmo  > 0: df_tie_sim.loc[mask, "T.MO"]  = nuevo_tmo
+                if nuevo_tmaq > 0: df_tie_sim.loc[mask, "T.Maq"] = nuevo_tmaq
 
     resumen_sim, detalle_sim, _ = explotar_pt(codigo_pt, df_exp, df_tie_sim)
 
@@ -522,13 +637,27 @@ def actualizar(n_clicks, codigo_pt, datos_simulador):
 
     resumen_proc = df_pt.groupby("Proceso")["Costo Unitario"].sum().reset_index()
     paleta       = ["#2196F3", "#4CAF50", "#FF9800", "#E91E63", "#9C27B0", "#00BCD4", "#FF5722"]
-    fig_don      = go.Figure(go.Pie(
+
+    # Dona en porcentaje
+    fig_don = go.Figure(go.Pie(
         labels=resumen_proc["Proceso"], values=resumen_proc["Costo Unitario"],
         hole=0.55, marker_colors=paleta[:len(resumen_proc)],
+        textinfo="label+percent",
         hovertemplate="<b>%{label}</b><br>S/ %{value:.6f}<br>%{percent}<extra></extra>"
     ))
     fig_don.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
                           margin=dict(l=10, r=10, t=10, b=10))
+
+    # Dona en soles
+    fig_don_soles = go.Figure(go.Pie(
+        labels=resumen_proc["Proceso"], values=resumen_proc["Costo Unitario"],
+        hole=0.55, marker_colors=paleta[:len(resumen_proc)],
+        textinfo="label+value",
+        texttemplate="<b>%{label}</b><br>S/ %{value:.4f}",
+        hovertemplate="<b>%{label}</b><br>S/ %{value:.6f}<br>%{percent}<extra></extra>"
+    ))
+    fig_don_soles.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
+                                margin=dict(l=10, r=10, t=10, b=10))
 
     df_res_fmt = df_pt[["Tipo de Costo", "Costo Unitario", "% del Total"]].copy()
     df_res_fmt["Costo Unitario"] = df_res_fmt["Costo Unitario"].map("S/ {:.6f}".format)
@@ -545,7 +674,7 @@ def actualizar(n_clicks, codigo_pt, datos_simulador):
             df_det_fmt[c] = df_det_fmt[c].map("{:.6f}".format)
     cols_det = [{"name": c, "id": c} for c in df_det_fmt.columns]
 
-    return (kpis_elem, fig_cas, fig_cas_pct, fig_don,
+    return (kpis_elem, fig_cas, fig_cas_pct, fig_don, fig_don_soles,
             df_res_fmt.to_dict("records"), cols_res,
             df_det_fmt.to_dict("records"), cols_det, msg)
 
