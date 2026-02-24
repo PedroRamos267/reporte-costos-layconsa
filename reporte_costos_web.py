@@ -21,6 +21,13 @@ PROCESOS_EXCLUIR = []
 # ───────────────────────────────────────────────────────────
 
 # ── Cargar datos ────────────────────────────────────────────
+import sys
+print(f"📂 Directorio actual: {os.getcwd()}")
+print(f"📄 Archivos disponibles: {os.listdir('.')}")
+if not os.path.exists(ARCHIVO_DATOS):
+    print(f"❌ ERROR: No se encontró {ARCHIVO_DATOS}")
+    sys.exit(1)
+print(f"✅ Excel encontrado: {ARCHIVO_DATOS}")
 df_exp = pd.read_excel(ARCHIVO_DATOS, sheet_name=HOJA_EXPLOSION)
 df_tie = pd.read_excel(ARCHIVO_DATOS, sheet_name=HOJA_TIEMPOS)
 
