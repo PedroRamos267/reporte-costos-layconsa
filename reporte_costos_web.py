@@ -276,43 +276,48 @@ def get_maquinas_inyeccion(codigo_pt):
 
 
 def get_semis_otros_procesos(codigo_pt):
-    """Semis de otros procesos (ENSAMBLE, ENCAJADO, TROQUELADO, DOSIFICADO)
-    con Cantidad Base, T.MO, T.Maq, Cant.Opr editables."""
+    """Otros procesos agrupados por máquina — incluye PT (ENCAJADO) y semis."""
     visitados  = set()
-    semis      = {}
+    maquinas   = {}
     excluidos  = ["INYEC", "MYT", "M&T", "MASAS"]
+
+    def agregar_si_aplica(codigo):
+        """Agrega el código a la tabla si su proceso no está excluido."""
+        t = df_tie[df_tie["Código Semi"] == codigo]
+        if not t.empty:
+            proc = str(t.iloc[0].get("Proceso", "")).strip().upper()
+            if not any(ex in proc for ex in excluidos) and proc != "SIN PROCESO":
+                t_row = t.iloc[0]
+                maq   = str(t_row.get("Maquina", codigo))
+                key   = f"{proc}_{maq}"
+                if key not in maquinas:
+                    maquinas[key] = {
+                        "Proceso":      proc,
+                        "Maquina":      maq,
+                        "Cantidad Base":float(t_row.get("Cantidad Base", 0) or 0),
+                        "T.MO":         float(t_row.get("T.MO",          0) or 0),
+                        "T.Maq":        float(t_row.get("T.Maq",         0) or 0),
+                        "Cant.Opr":     float(t_row.get("Cant.Opr",      0) or 0),
+                        "Tarifa Maq":   float(t_row.get("Tarifa Maquina",0) or 0),
+                        "Tarifa MO":    float(t_row.get("Tarifa MO",     0) or 0),
+                    }
 
     def buscar(codigo):
         if codigo in visitados:
             return
         visitados.add(codigo)
+        # Verificar el propio código (para capturar ENCAJADO del PT)
+        agregar_si_aplica(codigo)
         hijos = df_exp[df_exp["Código Semi"] == codigo]
         for _, row in hijos.iterrows():
             comp    = str(row["Componente"])
             familia = str(row.get("Familia", comp[:3])).strip()
-            t       = df_tie[df_tie["Código Semi"] == comp]
-            if not t.empty:
-                proc = str(t.iloc[0].get("Proceso", "")).strip().upper()
-                if not any(ex in proc for ex in excluidos) and proc != "SIN PROCESO":
-                    t_row = t.iloc[0]
-                    if comp not in semis:
-                        semis[comp] = {
-                            "Código Semi":  comp,
-                            "Descripción":  str(row.get("Descripción Componente", "")),
-                            "Proceso":      proc,
-                            "Maquina":      str(t_row.get("Maquina", "")),
-                            "Cantidad Base":float(t_row.get("Cantidad Base", 0) or 0),
-                            "T.MO":         float(t_row.get("T.MO",          0) or 0),
-                            "T.Maq":        float(t_row.get("T.Maq",         0) or 0),
-                            "Cant.Opr":     float(t_row.get("Cant.Opr",      0) or 0),
-                            "Tarifa Maq":   float(t_row.get("Tarifa Maquina",0) or 0),
-                            "Tarifa MO":    float(t_row.get("Tarifa MO",     0) or 0),
-                        }
+            agregar_si_aplica(comp)
             if familia.startswith("231"):
                 buscar(comp)
 
     buscar(codigo_pt)
-    return list(semis.values())
+    return list(maquinas.values())
 
 
 app.layout = html.Div(
@@ -371,14 +376,17 @@ app.layout = html.Div(
                 ],
                 editable=True, page_action="none",
             ),
-            html.Div(style={"marginTop": "12px", "display": "flex",
-                            "gap": "15px", "alignItems": "center"}, children=[
-                html.Button("🔄 Recalcular", id="btn-recalcular",
-                    style={"backgroundColor": COLORES["accent"], "color": "#000",
-                           "fontWeight": "bold", "border": "none", "borderRadius": "8px",
-                           "padding": "10px 24px", "cursor": "pointer", "fontSize": "14px"}),
-                html.Div(id="msg-simulador", style={"color": "#4CAF50", "fontSize": "13px"}),
-            ]),
+        ]),
+
+        # Botón recalcular — aplica a AMBOS simuladores
+        html.Div(style={"textAlign": "center", "margin": "15px 0"}, children=[
+            html.Button("🔄 Recalcular Todos los Procesos", id="btn-recalcular",
+                style={"backgroundColor": COLORES["accent"], "color": "#000",
+                       "fontWeight": "bold", "border": "none", "borderRadius": "8px",
+                       "padding": "12px 40px", "cursor": "pointer", "fontSize": "15px",
+                       "boxShadow": "0 0 15px rgba(0,200,255,0.4)"}),
+            html.Div(id="msg-simulador",
+                     style={"color": "#4CAF50", "fontSize": "13px", "marginTop": "8px"}),
         ]),
 
         # Simulador otros procesos
@@ -394,14 +402,13 @@ app.layout = html.Div(
                 id="tabla-simulador-otros",
                 columns=[
                     {"name": "Proceso",        "id": "Proceso",       "editable": False},
-                    {"name": "Máquina",         "id": "Maquina",       "editable": False},
-                    {"name": "Descripción",     "id": "Descripción",   "editable": False},
-                    {"name": "Cantidad Base",   "id": "Cantidad Base", "editable": True,  "type": "numeric"},
-                    {"name": "T.MO",            "id": "T.MO",          "editable": True,  "type": "numeric"},
-                    {"name": "T.Maq",           "id": "T.Maq",         "editable": True,  "type": "numeric"},
-                    {"name": "Cant.Opr",        "id": "Cant.Opr",      "editable": False},
-                    {"name": "Tarifa Maq",      "id": "Tarifa Maq",    "editable": False},
-                    {"name": "Tarifa MO",       "id": "Tarifa MO",     "editable": False},
+                    {"name": "Máquina",        "id": "Maquina",       "editable": False},
+                    {"name": "Cantidad Base",  "id": "Cantidad Base", "editable": True,  "type": "numeric"},
+                    {"name": "T.MO",           "id": "T.MO",          "editable": True,  "type": "numeric"},
+                    {"name": "T.Maq",          "id": "T.Maq",         "editable": True,  "type": "numeric"},
+                    {"name": "Cant.Opr",       "id": "Cant.Opr",      "editable": False},
+                    {"name": "Tarifa Maq",     "id": "Tarifa Maq",    "editable": False},
+                    {"name": "Tarifa MO",      "id": "Tarifa MO",     "editable": False},
                 ],
                 style_header={"backgroundColor": "#1F3864", "color": "white", "fontWeight": "bold"},
                 style_cell={"backgroundColor": "#1E2D3D", "color": COLORES["text"],
@@ -502,7 +509,6 @@ def cargar_simuladores(codigo_pt):
         rows_otros.append({
             "Proceso":      s["Proceso"],
             "Maquina":      s["Maquina"],
-            "Descripción":  s["Descripción"],
             "Cantidad Base":s["Cantidad Base"],
             "T.MO":         s["T.MO"],
             "T.Maq":        s["T.Maq"],
@@ -541,15 +547,16 @@ def actualizar(n_clicks, codigo_pt, datos_simulador, datos_otros):
                 nueva_base = (3600 / t_ciclo) * cav_oper * 24
                 mask = df_tie_sim["Maquina"].astype(str).str.strip() == maquina
                 df_tie_sim.loc[mask, "Cantidad Base"] = nueva_base
-    # Aplicar cambios de otros procesos por semi
+    # Aplicar cambios de otros procesos por máquina
     if datos_otros:
         for row in datos_otros:
-            codigo     = str(row.get("Código Semi", ""))
+            maquina    = str(row.get("Maquina", ""))
             nueva_base = float(row.get("Cantidad Base", 0) or 0)
-            nuevo_tmo  = float(row.get("T.MO",         0) or 0)
-            nuevo_tmaq = float(row.get("T.Maq",        0) or 0)
-            if codigo and nueva_base > 0:
-                mask = df_tie_sim["Código Semi"] == codigo
+            nuevo_tmo  = float(row.get("T.MO",          0) or 0)
+            nuevo_tmaq = float(row.get("T.Maq",         0) or 0)
+            if maquina and nueva_base > 0:
+                # Aplica a todos los semis que usan esta máquina
+                mask = df_tie_sim["Maquina"].astype(str).str.strip() == maquina
                 df_tie_sim.loc[mask, "Cantidad Base"] = nueva_base
                 if nuevo_tmo  > 0: df_tie_sim.loc[mask, "T.MO"]  = nuevo_tmo
                 if nuevo_tmaq > 0: df_tie_sim.loc[mask, "T.Maq"] = nuevo_tmaq
