@@ -53,12 +53,12 @@ def get_tiempos(codigo, df_t):
     row = df_t[df_t["Código Semi"] == str(codigo)]
     return row.iloc[0] if not row.empty else None
 
-def calcular_semi(codigo_semi, cantidad_req, df_e, df_t, cache, resumen_global):
+def calcular_semi(codigo_semi, cantidad_req, df_e, df_t, cache, resumen_global, codigo_pt):
     cache_key = f"{codigo_semi}_{cantidad_req}"
     if cache_key in cache:
         return cache[cache_key]["costo_x_und"], []
 
-    hijos = df_e[df_e["Código Semi"] == str(codigo_semi)].copy()
+    hijos = df_e[(df_e["Código Semi"] == str(codigo_semi)) & (df_e["Código PT"] == str(codigo_pt))].copy()
     if hijos.empty:
         return 0, []
 
@@ -88,7 +88,7 @@ def calcular_semi(codigo_semi, cantidad_req, df_e, df_t, cache, resumen_global):
         familia    = str(row.get("Familia", componente[:3])).strip()
 
         if es_fabricado(familia):
-            costo_calc, sub_det = calcular_semi(componente, cantidad, df_e, df_t, cache, resumen_global)
+            costo_calc, sub_det = calcular_semi(componente, cantidad, df_e, df_t, cache, resumen_global, codigo_pt)
             detalle.extend(sub_det)
             cm_comp = cantidad * costo_calc
         else:
@@ -166,7 +166,7 @@ def explotar_pt(codigo_pt, df_e, df_t):
         familia    = str(row.get("Familia", componente[:3])).strip()
 
         if es_fabricado(familia):
-            costo_calc, sub_det = calcular_semi(componente, cantidad, df_e, df_t, cache, resumen_global)
+            costo_calc, sub_det = calcular_semi(componente, cantidad, df_e, df_t, cache, resumen_global, codigo_pt)
             detalle.extend(sub_det)
             cm_comp = cantidad * costo_calc
         else:
