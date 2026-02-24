@@ -30,6 +30,14 @@ if not os.path.exists(ARCHIVO_DATOS):
 print(f"✅ Excel encontrado: {ARCHIVO_DATOS}")
 df_exp = pd.read_excel(ARCHIVO_DATOS, sheet_name=HOJA_EXPLOSION)
 df_tie = pd.read_excel(ARCHIVO_DATOS, sheet_name=HOJA_TIEMPOS)
+try:
+    df_mat = pd.read_excel(ARCHIVO_DATOS, sheet_name="Materiales")
+    df_mat.columns = df_mat.columns.str.strip()
+    df_mat["Codigo"] = df_mat["Codigo"].astype(str).str.strip()
+    print("✅ Hoja Materiales cargada")
+except:
+    df_mat = pd.DataFrame(columns=["Codigo","Descripción","UM","TIPO DE COMPRA","MOQ","LT-días","Tipo"])
+    print("⚠️ Hoja Materiales no encontrada, usando vacío")
 
 df_exp.columns = df_exp.columns.str.strip()
 df_tie.columns = df_tie.columns.str.strip()
@@ -461,31 +469,42 @@ app.layout = html.Div(
             ]),
         ]),
 
+        # ── Pareto reemplaza tabla resumen ────────────────────
         html.Div(style={"backgroundColor": COLORES["card"], "borderRadius": "12px",
                         "padding": "15px", "marginBottom": "20px"}, children=[
-            html.H3("Resumen por Proceso", style={"color": COLORES["accent"],
-                    "fontSize": "16px", "marginTop": 0}),
-            dash_table.DataTable(
-                id="tabla-resumen",
-                style_header={"backgroundColor": "#1F3864", "color": "white", "fontWeight": "bold"},
-                style_cell={"backgroundColor": "#1E2D3D", "color": COLORES["text"],
-                            "border": "1px solid #2A3F54", "padding": "8px", "textAlign": "center"},
-                style_data_conditional=[{"if": {"row_index": "odd"}, "backgroundColor": "#162030"}],
-                page_size=15,
-            )
+            html.H3("📊 Pareto de Costos por Tipo",
+                    style={"color": COLORES["accent"], "fontSize": "16px", "marginTop": 0}),
+            dcc.Graph(id="grafico-pareto")
         ]),
 
+        # ── Materiales comprados reemplaza detalle componentes ──
         html.Div(style={"backgroundColor": COLORES["card"], "borderRadius": "12px",
                         "padding": "15px"}, children=[
-            html.H3("Detalle por Componente", style={"color": COLORES["accent"],
-                    "fontSize": "16px", "marginTop": 0}),
+            html.H3("🛒 Materiales Comprados — Precio Editable para Simular",
+                    style={"color": "#4CAF50", "fontSize": "16px", "marginTop": 0}),
+            html.P("Modifica el precio de cualquier material y presiona Recalcular.",
+                   style={"color": "#7A9BBF", "fontSize": "12px", "marginBottom": "10px"}),
             dash_table.DataTable(
-                id="tabla-detalle",
+                id="tabla-materiales",
+                columns=[
+                    {"name": "Tipo",           "id": "Tipo",           "editable": False},
+                    {"name": "Componente",      "id": "Componente",     "editable": False},
+                    {"name": "Descripción",     "id": "Descripción",    "editable": False},
+                    {"name": "Precio (S/)",     "id": "Precio",         "editable": True, "type": "numeric"},
+                    {"name": "Tipo de Compra",  "id": "Tipo de Compra", "editable": False},
+                    {"name": "MOQ",             "id": "MOQ",            "editable": False},
+                    {"name": "LT-días",         "id": "LT-días",        "editable": False},
+                ],
                 style_header={"backgroundColor": "#1F3864", "color": "white", "fontWeight": "bold"},
                 style_cell={"backgroundColor": "#1E2D3D", "color": COLORES["text"],
                             "border": "1px solid #2A3F54", "padding": "8px", "textAlign": "center"},
-                style_data_conditional=[{"if": {"row_index": "odd"}, "backgroundColor": "#162030"}],
-                page_size=15, filter_action="native", sort_action="native",
+                style_data_conditional=[
+                    {"if": {"column_editable": True},
+                     "backgroundColor": "#0D2137", "border": "1px solid #4CAF50"},
+                    {"if": {"row_index": "odd"}, "backgroundColor": "#162030"},
+                ],
+                editable=True, page_size=20,
+                filter_action="native", sort_action="native",
             )
         ]),
     ]
@@ -527,22 +546,62 @@ def cargar_simuladores(codigo_pt):
 
 
 @app.callback(
+    Output("tabla-materiales", "data"),
+    Input("selector-pt", "value"),
+)
+def cargar_materiales(codigo_pt):
+    """Carga todos los materiales COMPRADOS del PT en todos los niveles."""
+    visitados = set()
+    materiales = {}  # key=componente para evitar duplicados
+
+    def buscar(codigo):
+        if codigo in visitados:
+            return
+        visitados.add(codigo)
+        hijos = df_exp[(df_exp["Código Semi"] == codigo) &
+                       (df_exp["Código PT"] == codigo_pt)]
+        for _, row in hijos.iterrows():
+            comp    = str(row["Componente"])
+            familia = str(row.get("Familia", comp[:3])).strip()
+            if not es_fabricado(familia):
+                if comp not in materiales:
+                    # Cruzar con hoja Materiales
+                    mat_row = df_mat[df_mat["Codigo"] == comp]
+                    tipo_compra = str(mat_row["TIPO DE COMPRA"].iloc[0]) if not mat_row.empty and "TIPO DE COMPRA" in mat_row.columns else ""
+                    moq         = mat_row["MOQ"].iloc[0]    if not mat_row.empty and "MOQ" in mat_row.columns else ""
+                    lt_dias     = mat_row["LT-días"].iloc[0] if not mat_row.empty and "LT-días" in mat_row.columns else ""
+                    tipo        = str(mat_row["Tipo"].iloc[0]) if not mat_row.empty and "Tipo" in mat_row.columns else ""
+                    materiales[comp] = {
+                        "Tipo":          tipo,
+                        "Componente":    comp,
+                        "Descripción":   str(row.get("Descripción Componente", "")),
+                        "Precio":        float(row.get("Costo estandar", 0)),
+                        "Tipo de Compra":tipo_compra,
+                        "MOQ":           moq,
+                        "LT-días":       lt_dias,
+                    }
+            if es_fabricado(familia):
+                buscar(comp)
+
+    buscar(codigo_pt)
+    return sorted(materiales.values(), key=lambda x: x["Tipo"])
+
+
+@app.callback(
     Output("kpis",                "children"),
     Output("grafico-cascada",     "figure"),
     Output("grafico-cascada-pct", "figure"),
     Output("grafico-donut",       "figure"),
     Output("grafico-donut-soles", "figure"),
-    Output("tabla-resumen",       "data"),
-    Output("tabla-resumen",       "columns"),
-    Output("tabla-detalle",       "data"),
-    Output("tabla-detalle",       "columns"),
+    Output("grafico-pareto",      "figure"),
     Output("msg-simulador",       "children"),
-    Input("btn-recalcular",       "n_clicks"),
     Input("selector-pt",          "value"),
+    Input("btn-recalcular",       "n_clicks"),
     State("tabla-simulador",      "data"),
     State("tabla-simulador-otros","data"),
+    State("tabla-materiales",     "data"),
 )
-def actualizar(n_clicks, codigo_pt, datos_simulador, datos_otros):
+def actualizar(codigo_pt, n_clicks, datos_simulador, datos_otros, datos_materiales):
     df_tie_sim = df_tie.copy()
     # Aplicar cambios de inyección por máquina
     if datos_simulador:
@@ -568,7 +627,24 @@ def actualizar(n_clicks, codigo_pt, datos_simulador, datos_otros):
                 if nuevo_tmo  > 0: df_tie_sim.loc[mask, "T.MO"]  = nuevo_tmo
                 if nuevo_tmaq > 0: df_tie_sim.loc[mask, "T.Maq"] = nuevo_tmaq
 
-    resumen_sim, detalle_sim, _ = explotar_pt(codigo_pt, df_exp, df_tie_sim)
+    # Aplicar precios modificados de materiales
+    df_exp_sim = df_exp.copy()
+    if datos_materiales:
+        for row in datos_materiales:
+            comp  = str(row.get("Componente", ""))
+            precio = float(row.get("Precio", 0) or 0)
+            if comp and precio > 0:
+                mask = df_exp_sim["Componente"] == comp
+                df_exp_sim.loc[mask, "Costo estandar"] = precio
+
+    filas_pt   = df_exp_sim[df_exp_sim["Código PT"]   == str(codigo_pt)]
+    filas_semi = df_exp_sim[df_exp_sim["Código Semi"] == str(codigo_pt)]
+    print(f"DEBUG codigo_pt={codigo_pt}")
+    print(f"DEBUG filas donde Código PT={codigo_pt}: {len(filas_pt)}")
+    print(f"DEBUG filas donde Código Semi={codigo_pt}: {len(filas_semi)}")
+    print(f"DEBUG primeros Código Semi únicos: {df_exp_sim['Código Semi'].unique()[:5]}")
+    resumen_sim, detalle_sim, _ = explotar_pt(codigo_pt, df_exp_sim, df_tie_sim)
+    print(f"DEBUG resumen_sim={resumen_sim}")
 
     cant_base_pt = float(df_exp[df_exp["Código Semi"] == codigo_pt]["Cantidad Base"].iloc[0]) \
                    if not df_exp[df_exp["Código Semi"] == codigo_pt].empty else 1
@@ -673,24 +749,40 @@ def actualizar(n_clicks, codigo_pt, datos_simulador, datos_otros):
     fig_don_soles.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
                                 margin=dict(l=10, r=10, t=10, b=10))
 
-    df_res_fmt = df_pt[["Tipo de Costo", "Costo Unitario", "% del Total"]].copy()
-    df_res_fmt["Costo Unitario"] = df_res_fmt["Costo Unitario"].map("S/ {:.6f}".format)
-    df_res_fmt["% del Total"]    = df_res_fmt["% del Total"].map("{:.1%}".format)
-    cols_res = [{"name": c, "id": c} for c in df_res_fmt.columns]
+    # ── Pareto ─────────────────────────────────────────────
+    df_pareto = df_pt[["Tipo de Costo","Costo Unitario"]].copy()
+    df_pareto = df_pareto.sort_values("Costo Unitario", ascending=False).reset_index(drop=True)
+    df_pareto["Acumulado %"] = (df_pareto["Costo Unitario"].cumsum() /
+                                 df_pareto["Costo Unitario"].sum() * 100)
 
-    cols_show  = ["Código Semi", "Descripción Semi", "Componente", "Descripción Componente",
-                  "Proceso", "Tipo", "Cantidad Total Req", "Costo Calculado",
-                  "CM", "CIF", "MOD", "Total"]
-    cols_show  = [c for c in cols_show if c in df_det.columns]
-    df_det_fmt = df_det[cols_show].copy()
-    for c in ["Costo Calculado", "CM", "CIF", "MOD", "Total"]:
-        if c in df_det_fmt.columns:
-            df_det_fmt[c] = df_det_fmt[c].map("{:.6f}".format)
-    cols_det = [{"name": c, "id": c} for c in df_det_fmt.columns]
+    fig_pareto = go.Figure()
+    fig_pareto.add_trace(go.Bar(
+        x=df_pareto["Tipo de Costo"], y=df_pareto["Costo Unitario"],
+        name="Costo Unitario", marker_color=COLORES["CM"],
+        text=[f"S/ {v:.4f}" for v in df_pareto["Costo Unitario"]],
+        textposition="outside",
+        hovertemplate="<b>%{x}</b><br>S/ %{y:.6f}<extra></extra>"
+    ))
+    fig_pareto.add_trace(go.Scatter(
+        x=df_pareto["Tipo de Costo"], y=df_pareto["Acumulado %"],
+        name="% Acumulado", yaxis="y2", mode="lines+markers",
+        line=dict(color=COLORES["TOTAL"], width=2),
+        marker=dict(size=6),
+        hovertemplate="<b>%{x}</b><br>%{y:.1f}%<extra></extra>"
+    ))
+    fig_pareto.update_layout(
+        template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        yaxis=dict(title="Costo Unitario (S/)"),
+        yaxis2=dict(title="% Acumulado", overlaying="y", side="right",
+                    range=[0, 110], ticksuffix="%"),
+        margin=dict(l=10, r=60, t=30, b=100),
+        xaxis_tickangle=-35, showlegend=True,
+        legend=dict(orientation="h", y=1.1)
+    )
 
     return (kpis_elem, fig_cas, fig_cas_pct, fig_don, fig_don_soles,
-            df_res_fmt.to_dict("records"), cols_res,
-            df_det_fmt.to_dict("records"), cols_det, msg)
+            fig_pareto, msg)
 
 
 if __name__ == "__main__":
