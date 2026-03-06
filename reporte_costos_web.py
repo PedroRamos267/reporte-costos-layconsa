@@ -378,7 +378,7 @@ app.layout = html.Div(
                     {"name": "Cav.Oper",       "id": "Cav.Oper",   "editable": True,  "type": "numeric"},
                     {"name": "Cav.Tot",        "id": "Cav.Tot",    "editable": False},
                     {"name": "Cant.Base Calc", "id": "Cant.Base",  "editable": False},
-                    {"name": "Tarifa Maq",     "id": "Tarifa Maq", "editable": False},
+                    {"name": "Tarifa Maq",     "id": "Tarifa Maq", "editable": True, "type": "numeric"},
                     {"name": "Tarifa MO",      "id": "Tarifa MO",  "editable": False},
                 ],
                 style_header={"backgroundColor": "#1F3864", "color": "white", "fontWeight": "bold"},
@@ -422,7 +422,7 @@ app.layout = html.Div(
                     {"name": "T.MO",           "id": "T.MO",          "editable": True,  "type": "numeric"},
                     {"name": "T.Maq",          "id": "T.Maq",         "editable": True,  "type": "numeric"},
                     {"name": "Cant.Opr",       "id": "Cant.Opr",      "editable": False},
-                    {"name": "Tarifa Maq",     "id": "Tarifa Maq",    "editable": False},
+                    {"name": "Tarifa Maq",     "id": "Tarifa Maq",    "editable": True, "type": "numeric"},
                     {"name": "Tarifa MO",      "id": "Tarifa MO",     "editable": False},
                 ],
                 style_header={"backgroundColor": "#1F3864", "color": "white", "fontWeight": "bold"},
@@ -613,6 +613,8 @@ def actualizar(codigo_pt, n_clicks, datos_simulador, datos_otros, datos_material
                 nueva_base = (3600 / t_ciclo) * cav_oper * 24
                 mask = df_tie_sim["Maquina"].astype(str).str.strip() == maquina
                 df_tie_sim.loc[mask, "Cantidad Base"] = nueva_base
+                tarifa_maq_sim = float(row.get("Tarifa Maq", 0) or 0)
+                if tarifa_maq_sim > 0: df_tie_sim.loc[mask, "Tarifa Maquina"] = tarifa_maq_sim
     # Aplicar cambios de otros procesos por máquina
     if datos_otros:
         for row in datos_otros:
@@ -624,6 +626,8 @@ def actualizar(codigo_pt, n_clicks, datos_simulador, datos_otros, datos_material
                 # Aplica a todos los semis que usan esta máquina
                 mask = df_tie_sim["Maquina"].astype(str).str.strip() == maquina
                 df_tie_sim.loc[mask, "Cantidad Base"] = nueva_base
+                tarifa_maq_sim = float(row.get("Tarifa Maq", 0) or 0)
+                if tarifa_maq_sim > 0: df_tie_sim.loc[mask, "Tarifa Maquina"] = tarifa_maq_sim
                 if nuevo_tmo  > 0: df_tie_sim.loc[mask, "T.MO"]  = nuevo_tmo
                 if nuevo_tmaq > 0: df_tie_sim.loc[mask, "T.Maq"] = nuevo_tmaq
 
@@ -738,16 +742,24 @@ def actualizar(codigo_pt, n_clicks, datos_simulador, datos_otros, datos_material
     fig_don.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
                           margin=dict(l=10, r=10, t=10, b=10))
 
-    # Dona en soles
+    # Dona CM + CIF + MOD agrupados
+    resumen_tipo = df_pt.copy()
+    resumen_tipo["Tipo"] = resumen_tipo["Tipo de Costo"].str.split(" ").str[0]
+    resumen_tipo = resumen_tipo.groupby("Tipo")["Costo Unitario"].sum().reset_index()
     fig_don_soles = go.Figure(go.Pie(
-        labels=resumen_proc["Proceso"], values=resumen_proc["Costo Unitario"],
-        hole=0.55, marker_colors=paleta[:len(resumen_proc)],
-        textinfo="label+value",
-        texttemplate="<b>%{label}</b><br>S/ %{value:.4f}",
+        labels=resumen_tipo["Tipo"],
+        values=resumen_tipo["Costo Unitario"],
+        hole=0.55,
+        marker_colors=["#2196F3", "#FF9800", "#4CAF50"],
+        textinfo="label+percent",
+        texttemplate="<b>%{label}</b><br>%{percent}",
         hovertemplate="<b>%{label}</b><br>S/ %{value:.6f}<br>%{percent}<extra></extra>"
     ))
-    fig_don_soles.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
-                                margin=dict(l=10, r=10, t=10, b=10))
+    fig_don_soles.update_layout(
+        template="plotly_dark",
+        paper_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=10, r=10, t=10, b=10)
+    )
 
     # ── Pareto ─────────────────────────────────────────────
     df_pareto = df_pt[["Tipo de Costo","Costo Unitario"]].copy()
