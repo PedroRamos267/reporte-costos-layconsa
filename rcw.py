@@ -10,9 +10,7 @@ import pandas as pd
 import os
 from datetime import datetime
 import plotly.graph_objects as go
-from dash import Dash, html, dcc, Input, Output, dash_table, State, callback_context
-import io
-import base64
+from dash import Dash, html, dcc, Input, Output, dash_table, State
 
 # ─── CONFIGURACIÓN ─────────────────────────────────────────
 ARCHIVO_DATOS    = "Analisis de costos_PY.xlsx"
@@ -244,103 +242,6 @@ if not df_resumen.empty:
         df_resumen.groupby("Código PT")["Costo Unitario"].transform("sum")
     )
 
-
-# ── Procesos con detalle completo ──────────────────────────
-PROCESOS_CON_DETALLE = ["INYECCIÓN","INYECCION","ENSAMBLE","ENCAJADO",
-                        "TROQUELADO","SOPLADO","DOSIFICADO","TERMOEN",
-                        "TERMOENCOGIDO"]
-
-def construir_tabla_cascada(codigo_pt, df_e, df_t, resumen_sim, cant_base_pt):
-    """
-    Construye tabla detallada por proceso:
-    - Procesos con detalle: muestra componentes + MOD + CIF
-    - Otros procesos: solo una fila con el costo total
-    - Fila final: TOTAL PT
-    """
-    filas = []
-    total_general = 0
-
-    # Reconstruir detalle para este PT
-    _, detalle_sim, _ = explotar_pt(codigo_pt, df_e, df_t)
-
-    # Agrupar detalle por proceso
-    det_df = pd.DataFrame(detalle_sim) if detalle_sim else pd.DataFrame()
-
-    for proceso, valores in resumen_sim.items():
-        total_proceso = (valores["CM"] + valores["CIF"] + valores["MOD"]) / cant_base_pt
-        proc_upper = proceso.strip().upper()
-        tiene_detalle = any(p in proc_upper for p in PROCESOS_CON_DETALLE)
-
-        if tiene_detalle and not det_df.empty:
-            # Filas de componentes del proceso
-            det_proc = det_df[det_df["Proceso"].str.upper().str.strip() == proc_upper]
-
-# Componentes de inyección: agrupar por nombre Componente de Tiempos
-            # CM = suma total de CM de todos los semis de ese componente / cant_base_pt
-            if "INYEC" in proc_upper:
-                grupos_comp = {}
-                codigos = det_proc["Código Semi"].unique()
-                for cod in codigos:
-                    t_row = df_t[df_t["Código Semi"] == str(cod)]
-                    if not t_row.empty:
-                        comp_nombre = str(t_row.iloc[0].get("Componente", cod))
-                        # Suma todo el CM de los componentes comprados de este semi
-                        filas_semi = det_proc[
-                            (det_proc["Código Semi"] == cod) & 
-                            (det_proc["Tipo"] == "COMPRADO")
-                        ]
-                        cm_total_semi = filas_semi["CM"].sum() if not filas_semi.empty else 0
-                        if cm_total_semi > 0:
-                            grupos_comp[comp_nombre] = grupos_comp.get(comp_nombre, 0) + cm_total_semi
-                for comp_nombre, cm_total in grupos_comp.items():
-                    # Dividir entre cant_base_pt igual que CIF y MOD
-                    costo_und = cm_total / cant_base_pt
-                    filas.append({
-                        "Proceso": proceso,
-                        "Componente": comp_nombre,
-                        "Costo": costo_und,
-                    })
-            else:
-                # Componentes comprados (no 231)
-                comp_comprados = det_proc[det_proc["Tipo"] == "COMPRADO"]
-                grupos = comp_comprados.groupby(["Componente","Descripción Componente"])["CM"].sum()
-                for (cod, desc), cm in grupos.items():
-                    costo_und = cm / cant_base_pt
-                    if costo_und > 0:
-                        filas.append({
-                            "Proceso": proceso,
-                            "Componente": desc if desc and desc != "nan" else cod,
-                            "Costo": costo_und,
-                        })
-
-            # MOD y CIF
-            mod = valores["MOD"] / cant_base_pt
-            cif = valores["CIF"] / cant_base_pt
-            if mod > 0:
-                filas.append({"Proceso": proceso, "Componente": "MOD", "Costo": mod})
-            if cif > 0:
-                filas.append({"Proceso": proceso, "Componente": "CIF", "Costo": cif})
-        else:
-            # Proceso sin detalle — solo una fila con total
-            filas.append({"Proceso": proceso, "Componente": "—", "Costo": total_proceso})
-
-        total_general += total_proceso
-
-    # Fila total
-    filas.append({"Proceso": "TOTAL PT", "Componente": "", "Costo": total_general})
-
-    # Agregar %TG
-    for f in filas:
-        if total_general > 0 and f["Proceso"] != "TOTAL PT":
-            f["%TG"] = f"{f['Costo']/total_general*100:.1f}%"
-        elif f["Proceso"] == "TOTAL PT":
-            f["%TG"] = "100.0%"
-        else:
-            f["%TG"] = "0.0%"
-        f["Costo"] = f"S/ {f['Costo']:.6f}"
-
-    return filas
-
 # ── Dashboard ───────────────────────────────────────────────
 app    = Dash(__name__)
 server = app.server  # Necesario para Render/gunicorn
@@ -499,12 +400,6 @@ app.layout = html.Div(
                        "fontWeight": "bold", "border": "none", "borderRadius": "8px",
                        "padding": "12px 40px", "cursor": "pointer", "fontSize": "15px",
                        "boxShadow": "0 0 15px rgba(0,200,255,0.4)"}),
-            html.Button("⬇️ Descargar Excel", id="btn-descargar",
-                style={"backgroundColor": "#4CAF50", "color": "#000",
-                       "fontWeight": "bold", "border": "none", "borderRadius": "8px",
-                       "padding": "12px 30px", "cursor": "pointer", "fontSize": "15px",
-                       "boxShadow": "0 0 15px rgba(76,175,80,0.4)"}),
-            dcc.Download(id="descarga-excel"),
             html.Div(id="msg-simulador",
                      style={"color": "#4CAF50", "fontSize": "13px", "marginTop": "8px"}),
         ]),
@@ -580,51 +475,6 @@ app.layout = html.Div(
             html.H3("📊 Pareto de Costos por Tipo",
                     style={"color": COLORES["accent"], "fontSize": "16px", "marginTop": 0}),
             dcc.Graph(id="grafico-pareto")
-        ]),
-
-        # ── Tabla cascada detallada + dona ─────────────────────
-        html.Div(style={"display": "grid", "gridTemplateColumns": "1fr 1fr",
-                        "gap": "20px", "marginBottom": "20px"}, children=[
-            html.Div(style={"backgroundColor": COLORES["card"], "borderRadius": "12px",
-                            "padding": "15px"}, children=[
-                html.H3("📋 Cascada de Costos Detallada por Proceso",
-                        style={"color": COLORES["accent"], "fontSize": "16px", "marginTop": 0}),
-                dash_table.DataTable(
-                    id="tabla-cascada-detalle",
-                    columns=[
-                        {"name": "Proceso",    "id": "Proceso"},
-                        {"name": "Componente", "id": "Componente"},
-                        {"name": "Costo",      "id": "Costo"},
-                        {"name": "%TG",        "id": "%TG"},
-                    ],
-                    style_header={"backgroundColor": "#1F3864", "color": "white", "fontWeight": "bold"},
-                    style_cell={"backgroundColor": "#1E2D3D", "color": COLORES["text"],
-                                "border": "1px solid #2A3F54", "padding": "8px", "textAlign": "center"},
-                    style_cell_conditional=[
-                        {"if": {"column_id": "Proceso"},    "width": "150px", "minWidth": "150px"},
-                        {"if": {"column_id": "Componente"}, "width": "150px", "minWidth": "150px"},
-                        {"if": {"column_id": "Costo"},      "width": "150px", "minWidth": "150px"},
-                        {"if": {"column_id": "%TG"},        "width": "80px",  "minWidth": "80px"},
-                    ],
-                    style_data_conditional=[
-                        {"if": {"row_index": "odd"}, "backgroundColor": "#162030"},
-                        {"if": {"filter_query": '{Componente} = "MOD"'},
-                         "color": "#4CAF50", "fontWeight": "bold"},
-                        {"if": {"filter_query": '{Componente} = "CIF"'},
-                         "color": "#FF9800", "fontWeight": "bold"},
-                        {"if": {"filter_query": '{Proceso} = "TOTAL PT"'},
-                         "backgroundColor": "#1F3864", "color": "#00C8FF",
-                         "fontWeight": "bold", "fontSize": "14px"},
-                    ],
-                    page_action="none",
-                )
-            ]),
-            html.Div(style={"backgroundColor": COLORES["card"], "borderRadius": "12px",
-                            "padding": "15px"}, children=[
-                html.H3("🥧 Distribución por Componente (%)",
-                        style={"color": COLORES["accent"], "fontSize": "16px", "marginTop": 0}),
-                dcc.Graph(id="grafico-dona-cascada")
-            ]),
         ]),
 
         # ── Materiales comprados reemplaza detalle componentes ──
@@ -744,8 +594,6 @@ def cargar_materiales(codigo_pt):
     Output("grafico-donut",       "figure"),
     Output("grafico-donut-soles", "figure"),
     Output("grafico-pareto",      "figure"),
-    Output("tabla-cascada-detalle", "data"),
-    Output("grafico-dona-cascada", "figure"),
     Output("msg-simulador",       "children"),
     Input("selector-pt",          "value"),
     Input("btn-recalcular",       "n_clicks"),
@@ -945,105 +793,8 @@ def actualizar(codigo_pt, n_clicks, datos_simulador, datos_otros, datos_material
         legend=dict(orientation="h", y=1.1)
     )
 
-    # ── Tabla cascada detallada ────────────────────────────
-    filas_cascada = construir_tabla_cascada(
-        codigo_pt, df_exp_sim, df_tie_sim, resumen_sim, cant_base_pt
-    )
-
-    # Dona cascada — excluye fila TOTAL PT
-    cascada_sin_total = [f for f in filas_cascada if f["Proceso"] != "TOTAL PT"]
-    labels_don_cas = [f"{f['Proceso']} — {f['Componente']}" for f in cascada_sin_total]
-    values_don_cas = [float(str(f["Costo"]).replace("S/ ", "")) for f in cascada_sin_total]
-    paleta_ext     = paleta * 5
-    fig_dona_cascada = go.Figure(go.Pie(
-        labels=labels_don_cas, values=values_don_cas,
-        hole=0.55, marker_colors=paleta_ext[:len(labels_don_cas)],
-        textinfo="percent",
-        hovertemplate="<b>%{label}</b><br>%{percent}<extra></extra>"
-    ))
-    fig_dona_cascada.update_layout(
-        template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
-        margin=dict(l=10, r=10, t=10, b=10)
-    )
-
     return (kpis_elem, fig_cas, fig_cas_pct, fig_don, fig_don_soles,
-            fig_pareto, filas_cascada, fig_dona_cascada, msg)
-
-
-@app.callback(
-    Output("descarga-excel", "data"),
-    Input("btn-descargar", "n_clicks"),
-    prevent_initial_call=True,
-)
-def descargar_excel(n_clicks):
-    from openpyxl.styles import Font, PatternFill, Alignment
-    from openpyxl.utils import get_column_letter
-
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        # ── Hoja 1: Resumen Global ──────────────────────────
-        resumen_global = df_resumen[
-            ["Código PT", "Descripción PT", "Proceso", "Tipo de Costo", "Costo Unitario", "% del Total"]
-        ].copy()
-        totales = df_resumen.groupby(["Código PT", "Descripción PT"])["Costo Unitario"].sum().reset_index()
-        totales["Proceso"]       = "TOTAL"
-        totales["Tipo de Costo"] = "TOTAL PT"
-        totales["% del Total"]   = 1.0
-        resumen_exp = pd.concat([resumen_global, totales], ignore_index=True)
-        resumen_exp = resumen_exp.sort_values(["Código PT", "Tipo de Costo"])
-        resumen_exp["% del Total"]    = resumen_exp["% del Total"].map("{:.1%}".format)
-        resumen_exp["Costo Unitario"] = resumen_exp["Costo Unitario"].map("{:.6f}".format)
-        resumen_exp.to_excel(writer, sheet_name="Resumen Global", index=False)
-
-        # ── Hoja 2: Detalle Componentes ─────────────────────
-        cols_det = ["Código PT", "Descripción PT", "Código Semi", "Descripción Semi",
-                    "Componente", "Descripción Componente", "Familia", "Tipo",
-                    "Proceso", "Cantidad Total Req", "Costo Calculado",
-                    "CM", "CIF", "MOD", "Total"]
-        cols_det = [c for c in cols_det if c in df_detalle.columns]
-        df_detalle[cols_det].to_excel(writer, sheet_name="Detalle Componentes", index=False)
-
-        # ── Hoja 3: Cascada Detallada por PT ────────────────
-        filas_cascada_total = []
-        for codigo_pt in df_resumen["Código PT"].unique():
-            desc_pt = df_resumen[df_resumen["Código PT"] == codigo_pt]["Descripción PT"].iloc[0]
-            cant_base_pt = float(df_exp[df_exp["Código Semi"] == codigo_pt]["Cantidad Base"].iloc[0])                            if not df_exp[df_exp["Código Semi"] == codigo_pt].empty else 1
-            if cant_base_pt == 0:
-                cant_base_pt = 1
-            resumen_pt, _, _ = explotar_pt(codigo_pt, df_exp, df_tie)
-            filas_pt = construir_tabla_cascada(codigo_pt, df_exp, df_tie, resumen_pt, cant_base_pt)
-            for f in filas_pt:
-                filas_cascada_total.append({
-                    "Código PT":      codigo_pt,
-                    "Descripción PT": desc_pt,
-                    "Proceso":        f["Proceso"],
-                    "Componente":     f["Componente"],
-                    "Costo":          f["Costo"],
-                    "%TG":            f["%TG"],
-                })
-        df_cascada = pd.DataFrame(filas_cascada_total)
-        df_cascada.to_excel(writer, sheet_name="Cascada Detallada", index=False)
-
-        # ── Formato ─────────────────────────────────────────
-        header_font = Font(bold=True, color="FFFFFF")
-        fills = {
-            "Resumen Global":      PatternFill("solid", fgColor="1F3864"),
-            "Detalle Componentes": PatternFill("solid", fgColor="2E75B6"),
-            "Cascada Detallada":   PatternFill("solid", fgColor="1F5C2E"),
-        }
-        for sheet_name, ws in writer.sheets.items():
-            fill = fills.get(sheet_name, PatternFill("solid", fgColor="1F3864"))
-            for cell in ws[1]:
-                cell.font      = header_font
-                cell.fill      = fill
-                cell.alignment = Alignment(horizontal="center")
-            for col in ws.columns:
-                max_len = max((len(str(c.value)) for c in col if c.value), default=10)
-                ws.column_dimensions[get_column_letter(col[0].column)].width = min(max_len + 4, 45)
-
-    output.seek(0)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return dcc.send_bytes(output.read(), filename=f"Reporte_Costos_{timestamp}.xlsx")
+            fig_pareto, msg)
 
 
 if __name__ == "__main__":
