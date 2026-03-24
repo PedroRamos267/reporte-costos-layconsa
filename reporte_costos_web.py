@@ -353,6 +353,17 @@ COLORES = {
 
 lista_pt_dd = df_resumen[["Código PT", "Descripción PT"]].drop_duplicates()
 
+def get_linea(codigo_pt):
+    c = str(codigo_pt)
+    if c.startswith("214011"):
+        return "Cuadernos"
+    # 7th digit (index 6) is a letter → Nuevos Desarrollos
+    if len(c) >= 7 and not c[6].isdigit():
+        return "Nuevos Desarrollos"
+    return "Útiles"
+
+lista_pt_dd["Línea"] = lista_pt_dd["Código PT"].apply(get_linea)
+
 
 def get_maquinas_inyeccion(codigo_pt):
     """Máquinas de INYECCIÓN con T.Ciclo y Cav.Oper editables."""
@@ -447,6 +458,24 @@ app.layout = html.Div(
         html.Div(style={"marginBottom": "25px"}, children=[
             html.Label("Selecciona un Producto Terminado:",
                        style={"color": COLORES["accent"], "fontWeight": "bold"}),
+            html.Div(style={"display": "flex", "gap": "10px", "margin": "8px 0"}, children=[
+                html.Button("Todos",              id="linea-todos",      n_clicks=0,
+                    style={"backgroundColor": COLORES["accent"], "color": "#000",
+                           "border": "none", "borderRadius": "6px", "padding": "6px 16px",
+                           "cursor": "pointer", "fontWeight": "bold", "fontSize": "13px"}),
+                html.Button("Útiles",             id="linea-utiles",     n_clicks=0,
+                    style={"backgroundColor": "#4A5568", "color": "white",
+                           "border": "none", "borderRadius": "6px", "padding": "6px 16px",
+                           "cursor": "pointer", "fontSize": "13px"}),
+                html.Button("Cuadernos",          id="linea-cuadernos",  n_clicks=0,
+                    style={"backgroundColor": "#4A5568", "color": "white",
+                           "border": "none", "borderRadius": "6px", "padding": "6px 16px",
+                           "cursor": "pointer", "fontSize": "13px"}),
+                html.Button("Nuevos Desarrollos", id="linea-nuevos",     n_clicks=0,
+                    style={"backgroundColor": "#4A5568", "color": "white",
+                           "border": "none", "borderRadius": "6px", "padding": "6px 16px",
+                           "cursor": "pointer", "fontSize": "13px"}),
+            ]),
             dcc.Dropdown(
                 id="selector-pt",
                 options=[{"label": f"{r['Código PT']} — {r['Descripción PT']}",
@@ -637,13 +666,15 @@ app.layout = html.Div(
             dash_table.DataTable(
                 id="tabla-materiales",
                 columns=[
-                    {"name": "Tipo",           "id": "Tipo",           "editable": False},
-                    {"name": "Componente",      "id": "Componente",     "editable": False},
-                    {"name": "Descripción",     "id": "Descripción",    "editable": False},
-                    {"name": "Precio (S/)",     "id": "Precio",         "editable": True, "type": "numeric"},
-                    {"name": "Tipo de Compra",  "id": "Tipo de Compra", "editable": False},
-                    {"name": "MOQ",             "id": "MOQ",            "editable": False},
-                    {"name": "LT-días",         "id": "LT-días",        "editable": False},
+                    {"name": "Tipo",             "id": "Tipo",           "editable": False},
+                    {"name": "Componente",        "id": "Componente",     "editable": False},
+                    {"name": "Descripción",       "id": "Descripción",    "editable": False},
+                    {"name": "Consumo x Und",     "id": "Consumo",        "editable": False},
+                    {"name": "Precio (S/)",       "id": "Precio",         "editable": True, "type": "numeric"},
+                    {"name": "CM (S/)",           "id": "CM",             "editable": False},
+                    {"name": "Tipo de Compra",    "id": "Tipo de Compra", "editable": False},
+                    {"name": "MOQ",               "id": "MOQ",            "editable": False},
+                    {"name": "LT-días",           "id": "LT-días",        "editable": False},
                 ],
                 style_header={"backgroundColor": "#1F3864", "color": "white", "fontWeight": "bold"},
                 style_cell={"backgroundColor": "#1E2D3D", "color": COLORES["text"],
@@ -695,6 +726,31 @@ def cargar_simuladores(codigo_pt):
     return rows_iny, rows_otros
 
 
+# ── Filtro por línea ────────────────────────────────────────
+@app.callback(
+    Output("selector-pt", "options"),
+    Input("linea-todos",     "n_clicks"),
+    Input("linea-utiles",    "n_clicks"),
+    Input("linea-cuadernos", "n_clicks"),
+    Input("linea-nuevos",    "n_clicks"),
+    prevent_initial_call=False,
+)
+def filtrar_linea(n_todos, n_utiles, n_cuadernos, n_nuevos):
+    from dash import callback_context
+    ctx     = callback_context
+    trigger = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else "linea-todos"
+    if trigger == "linea-utiles":
+        df_f = lista_pt_dd[lista_pt_dd["Línea"] == "Útiles"]
+    elif trigger == "linea-cuadernos":
+        df_f = lista_pt_dd[lista_pt_dd["Línea"] == "Cuadernos"]
+    elif trigger == "linea-nuevos":
+        df_f = lista_pt_dd[lista_pt_dd["Línea"] == "Nuevos Desarrollos"]
+    else:
+        df_f = lista_pt_dd
+    return [{"label": f"{r['Código PT']} — {r['Descripción PT']}", "value": r["Código PT"]}
+            for _, r in df_f.iterrows()]
+
+
 @app.callback(
     Output("tabla-materiales", "data"),
     Input("selector-pt", "value"),
@@ -734,6 +790,21 @@ def cargar_materiales(codigo_pt):
                 buscar(comp)
 
     buscar(codigo_pt)
+
+    # Calcular consumo x unidad = Cantidad Total Requerida acumulada / cant_base_pt
+    cant_base_pt = float(df_exp[df_exp["Código Semi"] == codigo_pt]["Cantidad Base"].iloc[0])                    if not df_exp[df_exp["Código Semi"] == codigo_pt].empty else 1
+    if cant_base_pt == 0: cant_base_pt = 1
+
+    # Acumular cantidades de cada componente en toda la explosión del PT
+    filas_exp_pt = df_exp[df_exp["Código PT"] == codigo_pt]
+    consumo_map  = filas_exp_pt[filas_exp_pt["Familia"].apply(lambda f: not es_fabricado(str(f)))]                   .groupby("Componente")["Cantidad Total Requerida"].sum() / cant_base_pt
+
+    for comp in materiales:
+        consumo = float(consumo_map.get(comp, 0))
+        precio  = float(materiales[comp].get("Precio", 0))
+        materiales[comp]["Consumo"] = round(consumo, 6)
+        materiales[comp]["CM"]      = round(consumo * precio, 4)
+
     return sorted(materiales.values(), key=lambda x: x["Tipo"])
 
 
@@ -752,6 +823,7 @@ def cargar_materiales(codigo_pt):
     State("tabla-simulador",      "data"),
     State("tabla-simulador-otros","data"),
     State("tabla-materiales",     "data"),
+    prevent_initial_call=True,
 )
 def actualizar(codigo_pt, n_clicks, datos_simulador, datos_otros, datos_materiales):
     df_tie_sim = df_tie.copy()
