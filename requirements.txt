@@ -1,5 +1,7 @@
+dash
 pandas
 openpyxl
 plotly
-dash
+flask
 gunicorn
+dash-auth

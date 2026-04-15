@@ -345,6 +345,15 @@ def construir_tabla_cascada(codigo_pt, df_e, df_t, resumen_sim, cant_base_pt):
 app    = Dash(__name__)
 server = app.server  # Necesario para Render/gunicorn
 
+import dash_auth
+
+VALID_USERNAME_PASSWORD_PAIRS = {
+    'Pablo': '123',
+    'admin': 'otro_password',
+}
+
+auth = dash_auth.BasicAuth(app, VALID_USERNAME_PASSWORD_PAIRS)
+
 COLORES = {
     "bg": "#0F1923", "card": "#1A2633", "text": "#E8EDF2",
     "accent": "#00C8FF", "CM": "#2196F3", "MOD": "#4CAF50",
@@ -533,7 +542,13 @@ app.layout = html.Div(
                        "fontWeight": "bold", "border": "none", "borderRadius": "8px",
                        "padding": "12px 30px", "cursor": "pointer", "fontSize": "15px",
                        "boxShadow": "0 0 15px rgba(76,175,80,0.4)"}),
+            html.Button("📄 Descargar PT Actual", id="btn-descargar-pt",
+                style={"backgroundColor": "#FF9800", "color": "#000",
+                       "fontWeight": "bold", "border": "none", "borderRadius": "8px",
+                       "padding": "12px 30px", "cursor": "pointer", "fontSize": "15px",
+                       "boxShadow": "0 0 15px rgba(255,152,0,0.4)"}),
             dcc.Download(id="descarga-excel"),
+            dcc.Download(id="descarga-pt"),
             html.Div(id="msg-simulador",
                      style={"color": "#4CAF50", "fontSize": "13px", "marginTop": "8px"}),
         ]),
@@ -1040,6 +1055,74 @@ def actualizar(codigo_pt, n_clicks, datos_simulador, datos_otros, datos_material
 
     return (kpis_elem, fig_cas, fig_cas_pct, fig_don, fig_don_soles,
             fig_pareto, filas_cascada, fig_dona_cascada, msg)
+
+
+# ── Descarga PT actual ──────────────────────────────────────
+@app.callback(
+    Output("descarga-pt",    "data"),
+    Input("btn-descargar-pt","n_clicks"),
+    State("selector-pt",     "value"),
+    State("tabla-materiales","data"),
+    prevent_initial_call=True,
+)
+def descargar_pt(n_clicks, codigo_pt, datos_mat):
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+    if not codigo_pt: return None
+
+    # Info del PT
+    row_pt    = df_resumen[df_resumen["Código PT"] == codigo_pt]
+    desc_pt   = row_pt["Descripción PT"].iloc[0] if not row_pt.empty else codigo_pt
+    cant_base = float(df_exp[df_exp["Código Semi"]==codigo_pt]["Cantidad Base"].iloc[0])                 if not df_exp[df_exp["Código Semi"]==codigo_pt].empty else 1
+
+    # Cascada del PT
+    resumen_pt, _, _ = explotar_pt(codigo_pt, df_exp, df_tie)
+    filas_cas = construir_tabla_cascada(codigo_pt, df_exp, df_tie, resumen_pt, cant_base)
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        # Hoja 1: Resumen KPIs
+        total = row_pt["Costo Unitario"].sum() if not row_pt.empty else 0
+        cm    = row_pt[row_pt["Tipo de Costo"].str.startswith("CM")]["Costo Unitario"].sum()  if not row_pt.empty else 0
+        cif   = row_pt[row_pt["Tipo de Costo"].str.startswith("CIF")]["Costo Unitario"].sum() if not row_pt.empty else 0
+        mod   = row_pt[row_pt["Tipo de Costo"].str.startswith("MOD")]["Costo Unitario"].sum() if not row_pt.empty else 0
+        df_kpi = pd.DataFrame([
+            {"Concepto": "Código PT",       "Valor": codigo_pt},
+            {"Concepto": "Descripción",     "Valor": desc_pt},
+            {"Concepto": "Cantidad Base",   "Valor": int(cant_base)},
+            {"Concepto": "Costo Unitario",  "Valor": round(total, 6)},
+            {"Concepto": "CM Unitario",     "Valor": round(cm,    6)},
+            {"Concepto": "CIF Unitario",    "Valor": round(cif,   6)},
+            {"Concepto": "MOD Unitario",    "Valor": round(mod,   6)},
+        ])
+        df_kpi.to_excel(writer, sheet_name="Resumen", index=False)
+
+        # Hoja 2: Cascada
+        pd.DataFrame(filas_cas).to_excel(writer, sheet_name="Cascada Detallada", index=False)
+
+        # Hoja 3: Materiales Comprados
+        if datos_mat:
+            pd.DataFrame(datos_mat).to_excel(writer, sheet_name="Materiales Comprados", index=False)
+
+        # Formato
+        hf    = Font(bold=True, color="FFFFFF")
+        fills = {
+            "Resumen":             PatternFill("solid", fgColor="1F3864"),
+            "Cascada Detallada":   PatternFill("solid", fgColor="1F5C2E"),
+            "Materiales Comprados":PatternFill("solid", fgColor="2E75B6"),
+        }
+        for sn, ws in writer.sheets.items():
+            for cell in ws[1]:
+                cell.font = hf
+                cell.fill = fills.get(sn, fills["Resumen"])
+                cell.alignment = Alignment(horizontal="center")
+            for col in ws.columns:
+                ml = max((len(str(c.value)) for c in col if c.value), default=10)
+                ws.column_dimensions[get_column_letter(col[0].column)].width = min(ml+4, 50)
+
+    output.seek(0)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return dcc.send_bytes(output.read(), filename=f"PT_{codigo_pt}_{ts}.xlsx")
 
 
 @app.callback(
