@@ -7,6 +7,7 @@
 """
 
 import pandas as pd
+import numpy as np
 import os
 from datetime import datetime
 import plotly.graph_objects as go
@@ -43,6 +44,36 @@ except:
 
 df_exp.columns = df_exp.columns.str.strip()
 df_tie.columns = df_tie.columns.str.strip()
+
+# ── Datos históricos SAP ─────────────────────────────────────
+ARCHIVO_HISTORICO = "cubo_costos.xlsx"
+if os.path.exists(ARCHIVO_HISTORICO):
+    df_cubo = pd.read_excel(ARCHIVO_HISTORICO, sheet_name="Cubo_Costos")
+    df_cubo.columns = df_cubo.columns.str.strip()
+    df_cubo["Cod_PT"] = df_cubo["Cod_PT"].astype(str).str.strip()
+    def clean_cod(x):
+        try:
+            s = str(x).strip()
+            if s in ("nan","None",""): return ""
+            return str(int(float(s)))
+        except: return str(x).strip()
+    df_cubo["Cod_Insumo"] = df_cubo["Cod_Insumo"].apply(clean_cod)
+    for col in ["VOL_PRODUCIDOS","CANT_REAL","COSTO_REAL"]:
+        df_cubo[col] = pd.to_numeric(df_cubo[col], errors="coerce").fillna(0)
+    PERIODOS_ORDENADOS = sorted(df_cubo["Periodo"].unique())
+    pts_cubo = df_cubo[["Cod_PT"]].drop_duplicates()
+    pts_cubo["Desc"] = pts_cubo["Cod_PT"].map(
+        df_cubo[["Cod_PT","Desc_PT"]].drop_duplicates().set_index("Cod_PT")["Desc_PT"])
+    def get_linea_h(c):
+        c = str(c)
+        if c.startswith("214011"): return "Cuadernos"
+        if len(c)>=7 and not c[6].isdigit(): return "Nuevos Desarrollos"
+        return "Útiles"
+    pts_cubo["Linea"] = pts_cubo["Cod_PT"].apply(get_linea_h)
+    pts_cubo = pts_cubo.sort_values("Cod_PT")
+else:
+    df_cubo = pd.DataFrame(); PERIODOS_ORDENADOS = []; pts_cubo = pd.DataFrame()
+
 
 for col in ["Código PT", "Código Semi", "Componente", "Familia"]:
     if col in df_exp.columns:
@@ -341,14 +372,197 @@ def construir_tabla_cascada(codigo_pt, df_e, df_t, resumen_sim, cant_base_pt):
 
     return filas
 
+# ── Funciones Histórico ─────────────────────────────────────
+def get_costo_teorico(codigo_pt):
+    """Retorna (cm_unit, cif_unit, mod_unit, total_unit) teórico."""
+    resumen, _, _ = explotar_pt(codigo_pt, df_exp, df_tie)
+    cant_base = float(df_exp[df_exp["Código Semi"]==codigo_pt]["Cantidad Base"].iloc[0]) \
+                if not df_exp[df_exp["Código Semi"]==codigo_pt].empty else 1
+    if cant_base == 0: cant_base = 1
+    cm  = sum(v["CM"]  for v in resumen.values()) / cant_base
+    cif = sum(v["CIF"] for v in resumen.values()) / cant_base
+    mod = sum(v["MOD"] for v in resumen.values()) / cant_base
+    return cm, cif, mod, cm+cif+mod
+
+# ── Costo real mensual con fallback ──────────────────────────
+PERIODOS_ORDENADOS = sorted(df_cubo["Periodo"].unique())
+
+def _get_costo_sap(codigo, periodo):
+    """
+    Obtiene costo unitario del PT desde SAP usando promedio ponderado por volumen.
+    Cuando hay múltiples OPs en el mes, pondera cada CU por su volumen.
+    """
+    sub = df_cubo[(df_cubo["Cod_PT"]==str(codigo)) & (df_cubo["Periodo"]==periodo)]
+    if sub.empty: return None
+
+    # Volumen total del mes (suma de todas las OPs)
+    vol_total = sub[sub["TIPO_COSTO_DIR"]=="Volumen"]["VOL_PRODUCIDOS"].sum()
+    if vol_total == 0: return None
+
+    # Costo Unitario: promedio ponderado por volumen de cada OP
+    cu_rows = sub[sub["TIPO_COSTO_DIR"]=="Costo Unitario"][["OP","COSTO_REAL"]].copy()
+    vol_rows = sub[sub["TIPO_COSTO_DIR"]=="Volumen"][["OP","VOL_PRODUCIDOS"]].copy()
+    if cu_rows.empty: return None
+
+    # Merge CU con volumen por OP
+    merged = cu_rows.merge(vol_rows, on="OP", how="left")
+    merged["VOL_PRODUCIDOS"] = merged["VOL_PRODUCIDOS"].fillna(0)
+    vol_cu = merged["VOL_PRODUCIDOS"].sum()
+    if vol_cu > 0:
+        # Promedio ponderado
+        cu_ponderado = (merged["COSTO_REAL"] * merged["VOL_PRODUCIDOS"]).sum() / vol_cu
+    else:
+        # Sin volumen por OP, usar promedio simple
+        cu_ponderado = cu_rows["COSTO_REAL"].mean()
+
+    # CM, CIF, MOD: también ponderados por volumen
+    cm_dir  = sub[sub["TIPO_COSTO_DIR"]=="Materiales"]["COSTO_REAL"].sum() / vol_total
+    cif_dir = sub[(sub["TIPO_COSTO_DIR"]=="Costo de Conversión") &
+                  (sub["CLASE_COSTO"]=="Gastos Indirectos")]["COSTO_REAL"].sum() / vol_total
+    mod_dir = sub[(sub["TIPO_COSTO_DIR"]=="Costo de Conversión") &
+                  (sub["CLASE_COSTO"]=="Mano de obra directa")]["COSTO_REAL"].sum() / vol_total
+
+    return {"total": cu_ponderado, "cm": cm_dir, "cif": cif_dir,
+            "mod": mod_dir, "vol": vol_total}
+
+
+def _get_teo_semi(codigo, codigo_pt):
+    """Costo teórico unitario (CM+CIF+MOD) de un semi para usar como fallback."""
+    hijos = df_exp[(df_exp["Código Semi"]==str(codigo)) &
+                   (df_exp["Código PT"]==str(codigo_pt))].copy()
+    if hijos.empty: return 0
+    t  = get_tiempos(codigo, df_tie)
+    cb = float(t["Cantidad Base"]) if t is not None else 1
+    if cb == 0: cb = 1
+    cif_u = (float(t["T.Maq"]) if t is not None else 0) / cb * (float(t["Tarifa Maquina"]) if t is not None else 0)
+    mod_u = (float(t["T.MO"])  if t is not None else 0) / cb * (float(t["Tarifa MO"])       if t is not None else 0)
+    cache = {}
+    def _cm(cod, cant, pt):
+        key = f"{cod}_{cant}"
+        if key in cache: return cache[key]
+        h = df_exp[(df_exp["Código Semi"]==cod)&(df_exp["Código PT"]==pt)]
+        if h.empty: return 0
+        t2 = get_tiempos(cod, df_tie)
+        cb2= float(t2["Cantidad Base"]) if t2 is not None else 1
+        if cb2==0: cb2=1
+        cif2=(float(t2["T.Maq"]) if t2 is not None else 0)/cb2*(float(t2["Tarifa Maquina"]) if t2 is not None else 0)
+        mod2=(float(t2["T.MO"])  if t2 is not None else 0)/cb2*(float(t2["Tarifa MO"])       if t2 is not None else 0)
+        cm2 = sum(
+            float(r["Cantidad Total Requerida"]) * (
+                _cm(str(r["Componente"]), float(r["Cantidad Total Requerida"]), pt)
+                if str(r.get("Familia",str(r["Componente"])[:3])).startswith("231")
+                else float(r["Costo estandar"])
+            ) for _,r in h.iterrows()
+        )
+        cu2 = (cm2 + (cif2+mod2)*cb2) / cb2
+        cache[key] = cu2; return cu2
+    cm_total = sum(
+        float(r["Cantidad Total Requerida"]) * (
+            _cm(str(r["Componente"]), float(r["Cantidad Total Requerida"]), codigo_pt)
+            if str(r.get("Familia",str(r["Componente"])[:3])).startswith("231")
+            else float(r["Costo estandar"])
+        ) for _,r in hijos.iterrows()
+    )
+    return (cm_total + (cif_u + mod_u) * cb) / cb
+
+
+def get_costo_real_mensual(codigo_pt):
+    """
+    Costo real mensual del PT usando directamente el campo Costo Unitario de SAP.
+    SAP ya acumula todos los niveles de la BOM en ese campo.
+    Si un mes no tiene datos → usar costo teórico como fallback.
+    CM, CIF, MOD del gráfico se toman del nivel directo del PT.
+    """
+    # Costo teórico total para fallback
+    cm_t, cif_t, mod_t, total_t = get_costo_teorico(codigo_pt)
+
+    # Obtener factores de los semis directos del PT para desglosar CM/CIF/MOD
+    nivel1 = df_exp[df_exp["Código Semi"]==str(codigo_pt)].copy()
+    cant_base_pt = float(nivel1["Cantidad Base"].iloc[0]) if not nivel1.empty else 1
+    if cant_base_pt == 0: cant_base_pt = 1
+
+    result = []
+    for per in PERIODOS_ORDENADOS:
+        r = _get_costo_sap(str(codigo_pt), per)
+        if r and r["total"] > 0:
+            # Datos reales SAP: usar Costo Unitario para el total
+            # Para CM/CIF/MOD usar los valores directos del nivel PT
+            # y sumar CIF+MOD de los semis no incluidos en el direct
+            total    = r["total"]
+            vol_pt   = r["vol"]
+            tiene    = vol_pt > 0
+            # Aproximar CM/CIF/MOD proporcional al teórico
+            if total_t > 0:
+                cm_r  = total * (cm_t  / total_t)
+                cif_r = total * (cif_t / total_t)
+                mod_r = total * (mod_t / total_t)
+            else:
+                cm_r = cif_r = mod_r = total / 3
+        else:
+            # Fallback: usar costo teórico
+            total  = total_t
+            vol_pt = 0
+            tiene  = False
+            cm_r   = cm_t
+            cif_r  = cif_t
+            mod_r  = mod_t
+
+        result.append({
+            "Periodo":   per,
+            "Volumen":   vol_pt,
+            "CM":        round(cm_r,  6),
+            "CIF":       round(cif_r, 6),
+            "MOD":       round(mod_r, 6),
+            "Total":     round(total, 6),
+            "Con_Datos": tiene,
+        })
+
+    return pd.DataFrame(result)
+
+# ── Lista PTs disponibles en cubo ────────────────────────────
+pts_cubo = df_cubo[["Cod_PT"]].drop_duplicates()
+pts_cubo["Desc"] = pts_cubo["Cod_PT"].map(
+    df_cubo[["Cod_PT","Desc_PT"]].drop_duplicates().set_index("Cod_PT")["Desc_PT"]
+)
+
+def get_linea(codigo_pt):
+    c = str(codigo_pt)
+    if c.startswith("214011"): return "Cuadernos"
+    if len(c) >= 7 and not c[6].isdigit(): return "Nuevos Desarrollos"
+    return "Útiles"
+
+pts_cubo["Linea"] = pts_cubo["Cod_PT"].apply(get_linea)
+pts_cubo = pts_cubo.sort_values("Cod_PT")
+
+
 # ── Dashboard ───────────────────────────────────────────────
 app    = Dash(__name__)
-server = app.server  # Necesario para Render/gunicorn
+server = app.server
 
+# ── Seguridad: solo redes Layconsa ──────────────────────────
+from flask import request, abort
+
+IPS_PERMITIDAS = {
+    "143.208.132.11",  # WiFi 1 Layconsa
+    # "200.xxx.xxx.xxx",  # WiFi 2 — agrega cuando tengas la IP real
+}
+
+@server.before_request
+def verificar_ip():
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    remote    = request.remote_addr
+    todas_ips = [ip.strip() for ip in forwarded.split(",")]
+    todas_ips.append(remote)
+    print(f"IPs detectadas: {todas_ips}")
+    # Filtro IP temporalmente desactivado — revisar logs para obtener IP real
+    # if not any(ip in IPS_PERMITIDAS for ip in todas_ips):
+    #     abort(403)
+
+# ── Autenticación ────────────────────────────────────────────
 import dash_auth
 
 VALID_USERNAME_PASSWORD_PAIRS = {
-    'Pablo': '123',
+    'pablo': '123',
     'admin': 'otro_password',
 }
 
@@ -358,7 +572,20 @@ COLORES = {
     "bg": "#0F1923", "card": "#1A2633", "text": "#E8EDF2",
     "accent": "#00C8FF", "CM": "#2196F3", "MOD": "#4CAF50",
     "CIF": "#FF9800", "TOTAL": "#E91E63",
+    "red": "#FF5252", "green": "#4CAF50", "orange": "#FF9800",
+    "cm": "#2196F3", "cif": "#FF9800", "mod": "#4CAF50",
+    "teorico": "#FF5252",
 }
+
+def empty_fig():
+    import plotly.graph_objects as go
+    fig = go.Figure()
+    fig.update_layout(
+        template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)", font_color="#E8EDF2",
+    )
+    return fig
+
 
 lista_pt_dd = df_resumen[["Código PT", "Descripción PT"]].drop_duplicates()
 
@@ -454,7 +681,7 @@ def get_semis_otros_procesos(codigo_pt):
     return list(maquinas.values())
 
 
-app.layout = html.Div(
+TAB_COSTOS = html.Div(
     style={"backgroundColor": COLORES["bg"], "minHeight": "100vh",
            "fontFamily": "'Segoe UI', sans-serif",
            "color": COLORES["text"], "padding": "20px"},
@@ -703,6 +930,222 @@ app.layout = html.Div(
                 filter_action="native", sort_action="native",
             )
         ]),
+    ]
+)
+
+TAB_HISTORICO = html.Div(
+    style={"backgroundColor": COLORES["bg"], "minHeight": "100vh",
+           "fontFamily": "'Segoe UI', sans-serif",
+           "color": COLORES["text"], "padding": "20px"},
+    children=[
+        # Header
+        html.Div(style={"textAlign": "center", "marginBottom": "25px"}, children=[
+            html.H1("📊 Histórico de Costos — Layconsa",
+                    style={"color": COLORES["accent"], "margin": 0, "fontSize": "24px"}),
+            html.P("Costo real SAP vs Costo teórico por PT",
+                   style={"color": "#7A9BBF", "margin": "5px 0 0 0"}),
+        ]),
+
+        # Selector
+        html.Div(style={"backgroundColor": COLORES["card"], "borderRadius": "12px",
+                        "padding": "15px", "marginBottom": "20px"}, children=[
+            html.H3("🔍 Seleccionar Producto Terminado",
+                    style={"color": COLORES["accent"], "fontSize": "15px", "marginTop": 0}),
+            # Filtros línea
+            html.Div(style={"display": "flex", "gap": "10px", "marginBottom": "10px"}, children=[
+                html.Button("Todos",              id="h-linea-todos",     n_clicks=0,
+                    style={"backgroundColor": COLORES["accent"], "color": "#000",
+                           "border": "none", "borderRadius": "6px", "padding": "6px 16px",
+                           "cursor": "pointer", "fontWeight": "bold", "fontSize": "13px"}),
+                html.Button("Útiles",             id="h-linea-utiles",    n_clicks=0,
+                    style={"backgroundColor": "#4A5568", "color": "white",
+                           "border": "none", "borderRadius": "6px", "padding": "6px 16px",
+                           "cursor": "pointer", "fontSize": "13px"}),
+                html.Button("Cuadernos",          id="h-linea-cuadernos", n_clicks=0,
+                    style={"backgroundColor": "#4A5568", "color": "white",
+                           "border": "none", "borderRadius": "6px", "padding": "6px 16px",
+                           "cursor": "pointer", "fontSize": "13px"}),
+                html.Button("Nuevos Des.",         id="h-linea-nuevos",    n_clicks=0,
+                    style={"backgroundColor": "#4A5568", "color": "white",
+                           "border": "none", "borderRadius": "6px", "padding": "6px 16px",
+                           "cursor": "pointer", "fontSize": "13px"}),
+            ]),
+            dcc.Dropdown(id="h-selector-pt", placeholder="Selecciona un PT...",
+                         style={"color": "#000"}),
+        ]),
+
+        # KPIs
+        html.Div(id="h-kpis", style={"display": "flex", "gap": "15px",
+                                      "flexWrap": "wrap", "marginBottom": "20px"}),
+
+        # Gráfico principal: apilado real + línea teórico
+        html.Div(style={"backgroundColor": COLORES["card"], "borderRadius": "12px",
+                        "padding": "15px", "marginBottom": "20px"}, children=[
+            html.H3("📈 Costo Unitario Real vs Teórico por Mes",
+                    style={"color": COLORES["accent"], "fontSize": "15px", "marginTop": 0}),
+            html.P("💡 Haz click en una barra para ver el detalle de materiales",
+                   style={"color": "#7A9BBF", "fontSize": "11px", "margin": "0 0 8px 0"}),
+            dcc.Graph(id="h-grafico-apilado", figure=empty_fig()),
+        ]),
+
+        # Modal detalle click
+        html.Div(id="h-modal-overlay", style={"display": "none"}, children=[
+            html.Div(style={
+                "position": "fixed", "top": 0, "left": 0, "right": 0, "bottom": 0,
+                "backgroundColor": "rgba(0,0,0,0.7)", "zIndex": 9999,
+                "display": "flex", "alignItems": "center", "justifyContent": "center",
+                "padding": "20px",
+            }, children=[
+                html.Div(style={
+                    "backgroundColor": COLORES["card"], "borderRadius": "16px",
+                    "padding": "24px", "width": "100%", "maxWidth": "480px",
+                    "border": "1px solid #2A3F54",
+                    "boxShadow": "0 20px 60px rgba(0,0,0,0.5)",
+                }, children=[
+                    # Header modal
+                    html.Div(style={"display": "flex", "justifyContent": "space-between",
+                                    "alignItems": "center", "marginBottom": "16px"}, children=[
+                        html.Div(children=[
+                            html.H3(id="h-modal-titulo",
+                                    style={"color": COLORES["accent"], "margin": 0,
+                                           "fontSize": "16px"}),
+                            html.P(id="h-modal-subtitulo",
+                                   style={"color": "#7A9BBF", "margin": "4px 0 0 0",
+                                          "fontSize": "12px"}),
+                        ]),
+                        html.Button("✕", id="h-modal-cerrar", n_clicks=0,
+                            style={"backgroundColor": "transparent", "color": "#7A9BBF",
+                                   "border": "none", "fontSize": "18px", "cursor": "pointer",
+                                   "padding": "0 4px"}),
+                    ]),
+                    # Contenido dinámico
+                    html.Div(id="h-modal-contenido"),
+                ])
+            ])
+        ]),
+
+        # Gráfico desviación %
+        html.Div(style={"backgroundColor": COLORES["card"], "borderRadius": "12px",
+                        "padding": "15px", "marginBottom": "20px"}, children=[
+            html.H3("📉 Desviación % Real vs Teórico por Mes",
+                    style={"color": COLORES["accent"], "fontSize": "15px", "marginTop": 0}),
+            dcc.Graph(id="h-grafico-desviacion", figure=empty_fig()),
+        ]),
+
+        # Grid: tabla mensual + tabla drivers
+        html.Div(style={"display": "grid", "gridTemplateColumns": "1fr 1fr",
+                        "gap": "20px", "marginBottom": "20px"}, children=[
+            html.Div(style={"backgroundColor": COLORES["card"], "borderRadius": "12px",
+                            "padding": "15px"}, children=[
+                html.H3("📋 Detalle Mensual de Costos",
+                        style={"color": COLORES["accent"], "fontSize": "15px", "marginTop": 0}),
+                dash_table.DataTable(
+                    id="h-tabla-mensual",
+                    columns=[
+                        {"name": "Periodo",  "id": "Periodo"},
+                        {"name": "Volumen",  "id": "Volumen"},
+                        {"name": "CM",       "id": "CM"},
+                        {"name": "CIF",      "id": "CIF"},
+                        {"name": "MOD",      "id": "MOD"},
+                        {"name": "Total Real","id": "Total"},
+                        {"name": "Teórico",  "id": "Teorico"},
+                        {"name": "Desv. S/", "id": "Desv_Soles"},
+                        {"name": "Desv. %",  "id": "Desv_Pct"},
+                    ],
+                    data=[],
+                    style_header={"backgroundColor": "#1F3864", "color": "white",
+                                  "fontWeight": "bold", "textAlign": "center"},
+                    style_cell={"backgroundColor": "#1E2D3D", "color": COLORES["text"],
+                                "border": "1px solid #2A3F54", "padding": "8px",
+                                "textAlign": "center", "fontSize": "12px"},
+                    style_data_conditional=[
+                        {"if": {"row_index": "odd"}, "backgroundColor": "#162030"},
+                        {"if": {"filter_query": "{Desv_Pct} contains '+'"},
+                         "color": COLORES["red"], "fontWeight": "bold"},
+                        {"if": {"filter_query": "{Desv_Pct} contains '-'"},
+                         "color": COLORES["green"], "fontWeight": "bold"},
+                    ],
+                    page_action="none", sort_action="native",
+                ),
+            ]),
+            html.Div(style={"backgroundColor": COLORES["card"], "borderRadius": "12px",
+                            "padding": "15px"}, children=[
+                html.H3("⚖️ Comparativo Teórico vs Real (Último Mes con Datos)",
+                        style={"color": COLORES["accent"], "fontSize": "15px", "marginTop": 0}),
+                dash_table.DataTable(
+                    id="h-tabla-comparativo",
+                    columns=[
+                        {"name": "Driver",   "id": "Driver"},
+                        {"name": "Teórico",  "id": "Teorico"},
+                        {"name": "Real",     "id": "Real"},
+                        {"name": "Desv. S/", "id": "Desv_Soles"},
+                        {"name": "Desv. %",  "id": "Desv_Pct"},
+                    ],
+                    data=[],
+                    style_header={"backgroundColor": "#1F3864", "color": "white",
+                                  "fontWeight": "bold", "textAlign": "center"},
+                    style_cell={"backgroundColor": "#1E2D3D", "color": COLORES["text"],
+                                "border": "1px solid #2A3F54", "padding": "10px",
+                                "textAlign": "center"},
+                    style_data_conditional=[
+                        {"if": {"row_index": "odd"}, "backgroundColor": "#162030"},
+                        {"if": {"filter_query": "{Desv_Pct} contains '+'"},
+                         "color": COLORES["red"], "fontWeight": "bold"},
+                        {"if": {"filter_query": "{Desv_Pct} contains '-'"},
+                         "color": COLORES["green"], "fontWeight": "bold"},
+                    ],
+                    page_action="none",
+                ),
+            ]),
+        ]),
+
+        # Volumen producido por mes
+        html.Div(style={"backgroundColor": COLORES["card"], "borderRadius": "12px",
+                        "padding": "15px", "marginBottom": "20px"}, children=[
+            html.H3("📦 Volumen Producido por Mes",
+                    style={"color": COLORES["accent"], "fontSize": "15px", "marginTop": 0}),
+            dcc.Graph(id="h-grafico-volumen", figure=empty_fig()),
+        ]),
+
+        # Botón descarga
+        html.Div(style={"textAlign": "center", "marginBottom": "20px"}, children=[
+            html.Button("⬇️ Descargar Análisis", id="h-btn-descargar",
+                style={"backgroundColor": COLORES["orange"], "color": "#000",
+                       "fontWeight": "bold", "border": "none", "borderRadius": "8px",
+                       "padding": "12px 30px", "cursor": "pointer", "fontSize": "15px"}),
+            dcc.Download(id="h-descarga"),
+        ]),
+    ]
+)
+
+app.layout = html.Div(
+    style={"backgroundColor": COLORES["bg"], "minHeight": "100vh",
+           "fontFamily": "'Segoe UI', sans-serif",
+           "color": COLORES["text"], "padding": "0"},
+    children=[
+        dcc.Tabs(
+            id="tabs-main", value="tab-costos",
+            colors={"border": "#2A3F54", "primary": COLORES["accent"],
+                    "background": COLORES["card"]},
+            parent_style={"backgroundColor": COLORES["bg"]},
+            children=[
+                dcc.Tab(label="📦 Reporte de Costos", value="tab-costos",
+                    style={"backgroundColor": COLORES["card"],
+                           "color": COLORES["text"], "padding": "10px 20px"},
+                    selected_style={"backgroundColor": COLORES["bg"],
+                        "color": COLORES["accent"], "fontWeight": "bold",
+                        "padding": "10px 20px",
+                        "borderTop": "3px solid " + COLORES["accent"]}),
+                dcc.Tab(label="📊 Histórico SAP", value="tab-historico",
+                    style={"backgroundColor": COLORES["card"],
+                           "color": COLORES["text"], "padding": "10px 20px"},
+                    selected_style={"backgroundColor": COLORES["bg"],
+                        "color": COLORES["accent"], "fontWeight": "bold",
+                        "padding": "10px 20px",
+                        "borderTop": "3px solid " + COLORES["accent"]}),
+            ]
+        ),
+        html.Div(id="tab-content")
     ]
 )
 
@@ -1199,6 +1642,575 @@ def descargar_excel(n_clicks):
     output.seek(0)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return dcc.send_bytes(output.read(), filename=f"Reporte_Costos_{timestamp}.xlsx")
+
+
+# ── Render pestaña activa ───────────────────────────────────
+@app.callback(
+    Output("tab-content", "children"),
+    Input("tabs-main", "value"),
+)
+def render_tab(tab):
+    if tab == "tab-historico":
+        return TAB_HISTORICO
+    return TAB_COSTOS
+
+
+# ── Callbacks Histórico ──────────────────────────────────────
+@app.callback(
+    Output("h-selector-pt", "options"),
+    Input("h-linea-todos",     "n_clicks"),
+    Input("h-linea-utiles",    "n_clicks"),
+    Input("h-linea-cuadernos", "n_clicks"),
+    Input("h-linea-nuevos",    "n_clicks"),
+    prevent_initial_call=False,
+)
+def filtrar_pts(n1, n2, n3, n4):
+    from dash import callback_context
+    ctx     = callback_context
+    trigger = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else "h-linea-todos"
+    if trigger == "h-linea-utiles":
+        df_f = pts_cubo[pts_cubo["Linea"]=="Útiles"]
+    elif trigger == "h-linea-cuadernos":
+        df_f = pts_cubo[pts_cubo["Linea"]=="Cuadernos"]
+    elif trigger == "h-linea-nuevos":
+        df_f = pts_cubo[pts_cubo["Linea"]=="Nuevos Desarrollos"]
+    else:
+        df_f = pts_cubo
+    return [{"label": f"{r['Cod_PT']} — {r['Desc']}", "value": r["Cod_PT"]}
+            for _, r in df_f.iterrows()]
+
+
+# ── Callback 2: Actualizar dashboard ────────────────────────
+@app.callback(
+    Output("h-kpis",               "children"),
+    Output("h-grafico-apilado",    "figure"),
+    Output("h-grafico-desviacion", "figure"),
+    Output("h-grafico-volumen",    "figure"),
+    Output("h-tabla-mensual",      "data"),
+    Output("h-tabla-comparativo",  "data"),
+    Input("h-selector-pt",         "value"),
+    prevent_initial_call=True,
+)
+def actualizar(codigo_pt):
+    if not codigo_pt:
+        return [], empty_fig(), empty_fig(), empty_fig(), [], []
+
+    df_hist = get_costo_real_mensual(codigo_pt)
+    cm_t, cif_t, mod_t, total_t = get_costo_teorico(codigo_pt)
+
+    # ── KPIs ────────────────────────────────────────────────
+    def kpi(titulo, valor, color, sub=None):
+        return html.Div(
+            style={"backgroundColor": COLORES["card"],
+                   "borderLeft": f"4px solid {color}",
+                   "borderRadius": "10px", "padding": "12px 18px",
+                   "flex": "1", "minWidth": "150px"},
+            children=[
+                html.P(titulo, style={"margin": 0, "fontSize": "11px", "color": "#7A9BBF"}),
+                html.H3(valor, style={"margin": "4px 0 0 0", "color": color, "fontSize": "16px"}),
+                html.P(sub or "", style={"margin": 0, "fontSize": "10px", "color": "#7A9BBF"}),
+            ]
+        )
+
+    if not df_hist.empty:
+        ultimo = df_hist[df_hist["Con_Datos"]].iloc[-1] if df_hist["Con_Datos"].any() else df_hist.iloc[-1]
+        real_total = ultimo["Total"]
+        desv_s = real_total - total_t
+        desv_p = (desv_s/total_t*100) if total_t > 0 else 0
+        vol_total = df_hist["Volumen"].sum()
+        color_desv = COLORES["red"] if desv_s > 0 else COLORES["green"]
+        kpis = [
+            kpi("💰 Costo Teórico",    f"S/ {total_t:,.6f}", COLORES["accent"], "por unidad"),
+            kpi("📊 Costo Real (últ.)", f"S/ {real_total:,.6f}", COLORES["orange"],
+                f"Período: {ultimo['Periodo']}"),
+            kpi("📉 Desviación",        f"{desv_p:+.1f}%", color_desv,
+                f"S/ {desv_s:+,.6f}/und"),
+            kpi("🧱 CM Teórico",        f"S/ {cm_t:,.6f}",  COLORES["cm"]),
+            kpi("⚙️ CIF Teórico",       f"S/ {cif_t:,.6f}", COLORES["cif"]),
+            kpi("👷 MOD Teórico",       f"S/ {mod_t:,.6f}", COLORES["mod"]),
+            kpi("📦 Vol. Total",         f"{vol_total:,.0f}", "#9C27B0", "unidades producidas"),
+        ]
+    else:
+        kpis = [kpi("💰 Costo Teórico", f"S/ {total_t:,.6f}", COLORES["accent"],
+                    "Sin datos reales")]
+
+    # ── Gráfico apilado ──────────────────────────────────────
+    if not df_hist.empty:
+        periodos = df_hist["Periodo"].tolist()
+        marker_syms = ["circle" if c else "diamond" for c in df_hist["Con_Datos"]]
+
+        totales   = df_hist["Total"].values
+        cm_vals   = df_hist["CM"].values
+        cif_vals  = df_hist["CIF"].values
+        mod_vals  = df_hist["MOD"].values
+
+        fig_ap = go.Figure()
+        fig_ap.add_trace(go.Bar(
+            name="CM Real", x=periodos, y=cm_vals,
+            marker_color=COLORES["cm"], opacity=0.85,
+            text=[f"S/ {v:.4f}" for v in cm_vals],
+            textposition="inside", textfont=dict(color="white", size=10),
+            hovertemplate="<b>CM</b>: S/ %{y:.4f}<br><i>Click para ver detalle</i><extra></extra>",
+            customdata=[[p, "CM"] for p in periodos],
+        ))
+        fig_ap.add_trace(go.Bar(
+            name="CIF Real", x=periodos, y=cif_vals,
+            marker_color=COLORES["cif"], opacity=0.85,
+            text=[f"S/ {v:.4f}" for v in cif_vals],
+            textposition="inside", textfont=dict(color="white", size=10),
+            hovertemplate="<b>CIF</b>: S/ %{y:.4f}<br><i>Click para ver detalle</i><extra></extra>",
+            customdata=[[p, "CIF"] for p in periodos],
+        ))
+        fig_ap.add_trace(go.Bar(
+            name="MOD Real", x=periodos, y=mod_vals,
+            marker_color=COLORES["mod"], opacity=0.85,
+            text=[f"S/ {v:.4f}" for v in mod_vals],
+            textposition="inside", textfont=dict(color="white", size=10),
+            hovertemplate="<b>MOD</b>: S/ %{y:.4f}<br><i>Click para ver detalle</i><extra></extra>",
+            customdata=[[p, "MOD"] for p in periodos],
+        ))
+        # Traza invisible para mostrar total encima
+        fig_ap.add_trace(go.Bar(
+            name="Total", x=periodos, y=[0]*len(periodos),
+            marker_color="rgba(0,0,0,0)",
+            text=[f"S/ {t:.4f}" for t in totales],
+            textposition="outside",
+            textfont=dict(color="#00C8FF", size=11),
+            showlegend=False,
+            hoverinfo="skip",
+        ))
+        # Línea costo teórico
+        fig_ap.add_trace(go.Scatter(
+            name="Costo Teórico", x=periodos,
+            y=[total_t]*len(periodos),
+            mode="lines", line=dict(color=COLORES["teorico"], width=2.5, dash="dash"),
+            hovertemplate="<b>Teórico</b>: S/ %{y:.4f}<extra></extra>",
+        ))
+        # Puntos sin producción
+        sin_prod = df_hist[~df_hist["Con_Datos"]]
+        if not sin_prod.empty:
+            fig_ap.add_trace(go.Scatter(
+                name="Sin producción (fallback)",
+                x=sin_prod["Periodo"], y=sin_prod["Total"],
+                mode="markers",
+                marker=dict(symbol="diamond", size=10, color="#9C27B0",
+                            line=dict(width=1.5, color="white")),
+            ))
+        fig_ap.update_layout(
+            template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)", barmode="stack",
+            legend=dict(orientation="h", y=1.1),
+            yaxis_title="Costo Unitario (S/)",
+            margin=dict(l=10,r=10,t=50,b=10),
+            hovermode="x unified",
+            hoverlabel=dict(bgcolor="#1A2633", font_color="#00C8FF",
+                           font_size=13, bordercolor="#00C8FF"),
+        )
+    else:
+        fig_ap = empty_fig()
+
+    # ── Gráfico desviación % ─────────────────────────────────
+    if not df_hist.empty and total_t > 0:
+        desv_pct = ((df_hist["Total"] - total_t) / total_t * 100).round(1)
+        colores_barras = [COLORES["red"] if v > 0 else COLORES["green"] for v in desv_pct]
+        fig_desv = go.Figure()
+        fig_desv.add_trace(go.Bar(
+            x=df_hist["Periodo"], y=desv_pct,
+            marker_color=colores_barras, name="Desviación %",
+            text=[f"{v:+.1f}%" for v in desv_pct], textposition="outside",
+        ))
+        fig_desv.add_hline(y=0, line_color="white", line_width=1, opacity=0.5)
+        fig_desv.update_layout(
+            template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            yaxis_title="Desviación (%)",
+            margin=dict(l=10,r=10,t=30,b=10),
+        )
+    else:
+        fig_desv = empty_fig()
+
+    # ── Gráfico volumen ──────────────────────────────────────
+    if not df_hist.empty:
+        fig_vol = go.Figure()
+        fig_vol.add_trace(go.Bar(
+            x=df_hist["Periodo"],
+            y=df_hist["Volumen"],
+            marker_color=COLORES["accent"], opacity=0.8,
+            text=[f"{int(v):,}" if v > 0 else "—" for v in df_hist["Volumen"]],
+            textposition="outside",
+        ))
+        fig_vol.update_layout(
+            template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            yaxis_title="Unidades",
+            margin=dict(l=10,r=10,t=30,b=10),
+        )
+    else:
+        fig_vol = empty_fig()
+
+    # ── Tabla mensual ────────────────────────────────────────
+    tabla_data = []
+    if not df_hist.empty:
+        for _, row in df_hist.iterrows():
+            desv_s = row["Total"] - total_t
+            desv_p = (desv_s/total_t*100) if total_t > 0 else 0
+            tabla_data.append({
+                "Periodo":    row["Periodo"],
+                "Volumen":    f"{int(row['Volumen']):,}" if row["Volumen"] > 0 else "—",
+                "CM":         f"{row['CM']:,.6f}",
+                "CIF":        f"{row['CIF']:,.6f}",
+                "MOD":        f"{row['MOD']:,.6f}",
+                "Total":      f"{row['Total']:,.6f}",
+                "Teorico":    f"{total_t:,.6f}",
+                "Desv_Soles": f"{desv_s:+,.6f}",
+                "Desv_Pct":   f"{desv_p:+.1f}%",
+            })
+
+    # ── Tabla comparativo ────────────────────────────────────
+    comp_data = []
+    if not df_hist.empty:
+        ultimo = df_hist[df_hist["Con_Datos"]].iloc[-1] if df_hist["Con_Datos"].any() else df_hist.iloc[-1]
+        for driver, teo, real_v in [
+            ("CM",    cm_t,    ultimo["CM"]),
+            ("CIF",   cif_t,   ultimo["CIF"]),
+            ("MOD",   mod_t,   ultimo["MOD"]),
+            ("TOTAL", total_t, ultimo["Total"]),
+        ]:
+            ds = real_v - teo
+            dp = (ds/teo*100) if teo > 0 else 0
+            comp_data.append({
+                "Driver":    driver,
+                "Teorico":   f"S/ {teo:,.6f}",
+                "Real":      f"S/ {real_v:,.6f}",
+                "Desv_Soles":f"S/ {ds:+,.6f}",
+                "Desv_Pct":  f"{dp:+.1f}%",
+            })
+
+    return kpis, fig_ap, fig_desv, fig_vol, tabla_data, comp_data
+
+
+# ── Callback 3: Descarga ─────────────────────────────────────
+@app.callback(
+    Output("h-descarga",     "data"),
+    Input("h-btn-descargar", "n_clicks"),
+    State("h-selector-pt",   "value"),
+    prevent_initial_call=True,
+)
+def descargar(n_clicks, codigo_pt):
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side, numbers
+    from openpyxl.utils import get_column_letter
+    from openpyxl.formatting.rule import ColorScaleRule
+    if not codigo_pt: return None
+
+    df_hist  = get_costo_real_mensual(codigo_pt)
+    cm_t, cif_t, mod_t, total_t = get_costo_teorico(codigo_pt)
+
+    # Descripción del PT
+    row_pt  = df_cubo[df_cubo["Cod_PT"]==codigo_pt]
+    desc_pt = row_pt["Desc_PT"].iloc[0] if not row_pt.empty else codigo_pt
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+
+        # ── Hoja 1: RESUMEN EJECUTIVO ────────────────────────
+        if not df_hist.empty:
+            ultimo  = df_hist[df_hist["Con_Datos"]].iloc[-1] if df_hist["Con_Datos"].any() else df_hist.iloc[-1]
+            real_cu = ultimo["Total"]
+            desv_s  = real_cu - total_t
+            desv_p  = desv_s / total_t * 100 if total_t > 0 else 0
+            mejor   = df_hist[df_hist["Con_Datos"]]["Total"].min() if df_hist["Con_Datos"].any() else 0
+            peor    = df_hist[df_hist["Con_Datos"]]["Total"].max() if df_hist["Con_Datos"].any() else 0
+            prom    = df_hist[df_hist["Con_Datos"]]["Total"].mean() if df_hist["Con_Datos"].any() else 0
+
+            exec_rows = [
+                ["RESUMEN EJECUTIVO — ANÁLISIS DE COSTOS", ""],
+                ["Código PT", codigo_pt],
+                ["Descripción", desc_pt],
+                ["Fecha análisis", datetime.now().strftime("%d/%m/%Y %H:%M")],
+                ["Períodos analizados", f"{df_hist['Periodo'].min()} a {df_hist['Periodo'].max()}"],
+                ["", ""],
+                ["COSTO TEÓRICO (S/ x und)", ""],
+                ["CM Teórico", round(cm_t, 6)],
+                ["CIF Teórico", round(cif_t, 6)],
+                ["MOD Teórico", round(mod_t, 6)],
+                ["TOTAL Teórico", round(total_t, 6)],
+                ["", ""],
+                ["COSTO REAL — ÚLTIMO MES CON DATOS", ""],
+                ["Período", ultimo["Periodo"]],
+                ["CM Real", round(ultimo["CM"], 6)],
+                ["CIF Real", round(ultimo["CIF"], 6)],
+                ["MOD Real", round(ultimo["MOD"], 6)],
+                ["TOTAL Real", round(real_cu, 6)],
+                ["", ""],
+                ["DESVIACIÓN vs TEÓRICO", ""],
+                ["Desviación (S/)", round(desv_s, 6)],
+                ["Desviación (%)", f"{desv_p:+.1f}%"],
+                ["Señal", "🔴 SOBRE COSTO" if desv_s > 0 else "🟢 BAJO COSTO"],
+                ["", ""],
+                ["ESTADÍSTICAS HISTÓRICAS", ""],
+                ["Costo mínimo real", round(mejor, 6)],
+                ["Costo máximo real", round(peor, 6)],
+                ["Costo promedio real", round(prom, 6)],
+                ["Volatilidad (%)", f"{df_hist[df_hist['Con_Datos']]['Total'].std()/prom*100:.1f}%" if prom > 0 else "—"],
+                ["", ""],
+                ["RECOMENDACIONES", ""],
+            ]
+            # Recomendaciones dinámicas
+            recs = []
+            if desv_p > 10:
+                recs.append(["⚠️", f"Costo real supera el teórico en {desv_p:.1f}%. Revisar eficiencia de procesos."])
+            if desv_p < -10:
+                recs.append(["✅", f"Costo real {abs(desv_p):.1f}% por debajo del teórico. Validar calidad del producto."])
+            vol_trend = df_hist[df_hist["Con_Datos"]]["Volumen"].tail(3).mean() if df_hist["Con_Datos"].any() else 0
+            if vol_trend > 0:
+                cif_pct = ultimo["CIF"] / real_cu * 100 if real_cu > 0 else 0
+                if cif_pct > 40:
+                    recs.append(["⚠️", f"CIF representa {cif_pct:.0f}% del costo real. Analizar eficiencia de maquinaria."])
+            cm_pct = ultimo["CM"] / real_cu * 100 if real_cu > 0 else 0
+            if cm_pct > 70:
+                recs.append(["📦", f"CM representa {cm_pct:.0f}% del costo. Enfocarse en negociación de materiales."])
+            if not recs:
+                recs.append(["✅", "Costo dentro de rango esperado. Mantener monitoreo mensual."])
+            for r in recs:
+                exec_rows.append(r)
+
+            df_exec = pd.DataFrame(exec_rows, columns=["Concepto", "Valor"])
+            df_exec.to_excel(writer, sheet_name="1. Resumen Ejecutivo", index=False)
+
+        # ── Hoja 2: HISTÓRICO MENSUAL ────────────────────────
+        if not df_hist.empty:
+            df_h = df_hist.copy()
+            df_h["Teórico"]      = round(total_t, 6)
+            df_h["Desv. S/"]     = (df_h["Total"] - total_t).round(6)
+            df_h["Desv. %"]      = ((df_h["Desv. S/"] / total_t) * 100).round(1).map(lambda x: f"{x:+.1f}%")
+            df_h["CM %"]         = (df_h["CM"]  / df_h["Total"] * 100).round(1).map(lambda x: f"{x:.0f}%")
+            df_h["CIF %"]        = (df_h["CIF"] / df_h["Total"] * 100).round(1).map(lambda x: f"{x:.0f}%")
+            df_h["MOD %"]        = (df_h["MOD"] / df_h["Total"] * 100).round(1).map(lambda x: f"{x:.0f}%")
+            df_h["Fuente"]       = df_h["Con_Datos"].map({True: "SAP Real", False: "Teórico (fallback)"})
+            df_h["Volumen"]      = df_h["Volumen"].apply(lambda x: int(x) if x > 0 else "—")
+            cols = ["Periodo","Volumen","CM","CM %","CIF","CIF %","MOD","MOD %",
+                    "Total","Teórico","Desv. S/","Desv. %","Fuente"]
+            df_h[cols].to_excel(writer, sheet_name="2. Histórico Mensual", index=False)
+
+        # ── Hoja 3: DETALLE CÁLCULO ──────────────────────────
+        calc_rows = [
+            ["METODOLOGÍA DE CÁLCULO", ""],
+            ["", ""],
+            ["FUENTE DE DATOS", ""],
+            ["Costo teórico", "Calculado desde la BOM (explosión de materiales) + tiempos de proceso"],
+            ["Costo real", "Extraído del cubo SAP — campo TIPO_COSTO_DIR = 'Costo Unitario'"],
+            ["", ""],
+            ["FÓRMULAS", ""],
+            ["CM Unitario (teórico)", "Σ (Cantidad_componente × Precio_estándar) / Cantidad_base"],
+            ["CIF Unitario (teórico)", "(T.Maq / Cant.Base) × Tarifa_Maquina"],
+            ["MOD Unitario (teórico)", "(T.MO / Cant.Base) × Tarifa_MO"],
+            ["Costo Real SAP", "Promedio ponderado por volumen cuando hay múltiples OPs en el mes"],
+            ["Fallback (sin producción)", "Se usa el costo teórico cuando el código no tuvo OPs ese mes"],
+            ["", ""],
+            ["DRIVERS DE COSTO", ""],
+            ["CM (Costo de Materiales)", "Insumos consumidos — materiales directos e indirectos"],
+            ["CIF (Costo Indirecto de Fabricación)", "Horas máquina × tarifa del puesto de trabajo"],
+            ["MOD (Mano de Obra Directa)", "Horas hombre × tarifa de mano de obra"],
+            ["", ""],
+            ["DESGLOSE TEÓRICO", ""],
+        ]
+        calc_rows.append(["Driver", "Costo Unitario (S/)", "% del Total"])
+        for drv, val, total in [("CM", cm_t, total_t), ("CIF", cif_t, total_t), ("MOD", mod_t, total_t)]:
+            pct = val/total*100 if total > 0 else 0
+            calc_rows.append([drv, round(val, 6), f"{pct:.1f}%"])
+        calc_rows.append(["TOTAL", round(total_t, 6), "100.0%"])
+
+        pd.DataFrame(calc_rows, columns=["Campo", "Descripción / Valor", "Notas"]).to_excel(
+            writer, sheet_name="3. Metodología", index=False)
+
+        # ── Formato general ──────────────────────────────────
+        from openpyxl.styles import Font, PatternFill, Alignment
+        fills = {
+            "1. Resumen Ejecutivo": PatternFill("solid", fgColor="1F3864"),
+            "2. Histórico Mensual": PatternFill("solid", fgColor="1F5C2E"),
+            "3. Metodología":       PatternFill("solid", fgColor="2E4A7A"),
+        }
+        hf = Font(bold=True, color="FFFFFF")
+        for sn, ws in writer.sheets.items():
+            # Header row
+            for cell in ws[1]:
+                cell.font = hf
+                cell.fill = fills.get(sn, fills["1. Resumen Ejecutivo"])
+                cell.alignment = Alignment(horizontal="center")
+            # Color key rows in Resumen
+            if sn == "1. Resumen Ejecutivo":
+                for row in ws.iter_rows(min_row=2):
+                    val = str(row[0].value or "")
+                    if val.isupper() and val != "":
+                        for cell in row:
+                            cell.font  = Font(bold=True, color="00C8FF")
+                            cell.fill  = PatternFill("solid", fgColor="0D1F2D")
+            # Color desviation in Histórico
+            if sn == "2. Histórico Mensual":
+                desv_col = None
+                for i, cell in enumerate(ws[1]):
+                    if cell.value == "Desv. %":
+                        desv_col = i + 1
+                if desv_col:
+                    for row in ws.iter_rows(min_row=2, min_col=desv_col, max_col=desv_col):
+                        for cell in row:
+                            try:
+                                v = float(str(cell.value or "0").replace("%","").replace("+",""))
+                                cell.font = Font(bold=True,
+                                    color="FF5252" if v > 0 else ("4CAF50" if v < 0 else "FFFFFF"))
+                            except: pass
+            # Col widths
+            for col in ws.columns:
+                ml = max((len(str(c.value)) for c in col if c.value), default=10)
+                ws.column_dimensions[get_column_letter(col[0].column)].width = min(ml+4, 55)
+
+    output.seek(0)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return dcc.send_bytes(output.read(), filename=f"Analisis_Costos_{codigo_pt}_{ts}.xlsx")
+
+
+
+# ── Modal: detalle al hacer click en barra ───────────────────
+@app.callback(
+    Output("h-modal-overlay",    "style"),
+    Output("h-modal-titulo",     "children"),
+    Output("h-modal-subtitulo",  "children"),
+    Output("h-modal-contenido",  "children"),
+    Input("h-grafico-apilado",   "clickData"),
+    Input("h-modal-cerrar",      "n_clicks"),
+    State("h-selector-pt",       "value"),
+    prevent_initial_call=True,
+)
+def toggle_modal(clickData, n_cerrar, codigo_pt):
+    from dash import callback_context
+    ctx = callback_context
+    trigger = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else ""
+
+    HIDDEN = {"display": "none"}
+    SHOWN  = {"display": "block"}
+
+    if trigger == "h-modal-cerrar" or not clickData:
+        return HIDDEN, "", "", []
+
+    if not codigo_pt:
+        return HIDDEN, "", "", []
+
+    # Extraer periodo y driver del click
+    point    = clickData["points"][0]
+    periodo  = point.get("x", "")
+    custom   = point.get("customdata", [None, None])
+    driver   = custom[1] if isinstance(custom, list) and len(custom) > 1 else "CM"
+
+    # Obtener descripción PT
+    row_pt  = df_cubo[df_cubo["Cod_PT"]==str(codigo_pt)]
+    desc_pt = row_pt["Desc_PT"].iloc[0] if not row_pt.empty else codigo_pt
+
+    titulo    = f"{'🧱 CM' if driver=='CM' else '⚙️ CIF' if driver=='CIF' else '👷 MOD'} — Detalle {periodo}"
+    subtitulo = f"{codigo_pt} · {desc_pt[:40]}"
+
+    # ── Materiales reales del PT en ese periodo (del cubo SAP) ──
+    sub = df_cubo[(df_cubo["Cod_PT"]==str(codigo_pt)) & (df_cubo["Periodo"]==periodo)]
+    vol = sub[sub["TIPO_COSTO_DIR"]=="Volumen"]["VOL_PRODUCIDOS"].sum()
+
+    if driver == "CM":
+        # Materiales consumidos con su costo unitario
+        mats = sub[sub["TIPO_COSTO_DIR"]=="Materiales"].copy()
+        if not mats.empty and vol > 0:
+            mats["Costo_Unit"] = mats["COSTO_REAL"] / vol
+            mats = mats[mats["Costo_Unit"] > 0].sort_values("Costo_Unit", ascending=False)
+            # Total CM
+            total_cm = mats["Costo_Unit"].sum()
+            items = []
+            for _, r in mats.head(10).iterrows():
+                desc  = str(r.get("Desc_Insumo", r.get("Cod_Insumo", "—")))[:35]
+                val   = r["Costo_Unit"]
+                pct   = val / total_cm * 100 if total_cm > 0 else 0
+                bar_w = f"{min(pct, 100):.0f}%"
+                items.append(html.Div(style={"marginBottom": "10px"}, children=[
+                    html.Div(style={"display": "flex", "justifyContent": "space-between",
+                                    "marginBottom": "3px"}, children=[
+                        html.Span(desc, style={"color": COLORES["text"], "fontSize": "12px"}),
+                        html.Span(f"S/ {val:.4f}", style={"color": COLORES["cm"],
+                                   "fontWeight": "bold", "fontSize": "12px"}),
+                    ]),
+                    html.Div(style={"backgroundColor": "#2A3F54", "borderRadius": "4px",
+                                    "height": "6px", "overflow": "hidden"}, children=[
+                        html.Div(style={"backgroundColor": COLORES["cm"], "height": "100%",
+                                        "width": bar_w, "borderRadius": "4px"})
+                    ]),
+                ]))
+            if len(mats) > 10:
+                resto = mats.iloc[10:]["Costo_Unit"].sum()
+                items.append(html.P(f"+ {len(mats)-10} materiales más: S/ {resto:.4f}",
+                    style={"color": "#7A9BBF", "fontSize": "11px", "marginTop": "8px"}))
+            items.append(html.Div(style={"borderTop": "1px solid #2A3F54",
+                                         "marginTop": "12px", "paddingTop": "10px",
+                                         "display": "flex", "justifyContent": "space-between"},
+                children=[
+                    html.Span("TOTAL CM", style={"color": "#7A9BBF", "fontWeight": "bold"}),
+                    html.Span(f"S/ {total_cm:.4f}", style={"color": COLORES["accent"],
+                               "fontWeight": "bold", "fontSize": "14px"}),
+                ]))
+            contenido = items
+        else:
+            contenido = [html.P("Sin datos de materiales para este período",
+                               style={"color": "#7A9BBF"})]
+
+    elif driver == "CIF":
+        conv = sub[(sub["TIPO_COSTO_DIR"]=="Costo de Conversión") &
+                   (sub["CLASE_COSTO"]=="Gastos Indirectos")].copy()
+        if not conv.empty and vol > 0:
+            total_cif = conv["COSTO_REAL"].sum() / vol
+            items = []
+            for _, r in conv.iterrows():
+                rec = str(r.get("COD_REC", "—"))
+                val = r["COSTO_REAL"] / vol
+                items.append(html.Div(style={"display": "flex", "justifyContent": "space-between",
+                                             "padding": "8px 0",
+                                             "borderBottom": "1px solid #2A3F54"}, children=[
+                    html.Span(f"⚙️ {rec}", style={"color": COLORES["text"], "fontSize": "13px"}),
+                    html.Span(f"S/ {val:.4f}", style={"color": COLORES["cif"],
+                               "fontWeight": "bold"}),
+                ]))
+            items.append(html.Div(style={"display": "flex", "justifyContent": "space-between",
+                                         "marginTop": "10px"}, children=[
+                html.Span("TOTAL CIF", style={"color": "#7A9BBF", "fontWeight": "bold"}),
+                html.Span(f"S/ {total_cif:.4f}", style={"color": COLORES["accent"],
+                           "fontWeight": "bold", "fontSize": "14px"}),
+            ]))
+            contenido = items
+        else:
+            contenido = [html.P("Sin datos de CIF para este período",
+                               style={"color": "#7A9BBF"})]
+
+    else:  # MOD
+        mod_data = sub[(sub["TIPO_COSTO_DIR"]=="Costo de Conversión") &
+                       (sub["CLASE_COSTO"]=="Mano de obra directa")].copy()
+        if not mod_data.empty and vol > 0:
+            total_mod = mod_data["COSTO_REAL"].sum() / vol
+            items = []
+            for _, r in mod_data.iterrows():
+                rec = str(r.get("COD_REC", "—"))
+                val = r["COSTO_REAL"] / vol
+                items.append(html.Div(style={"display": "flex", "justifyContent": "space-between",
+                                             "padding": "8px 0",
+                                             "borderBottom": "1px solid #2A3F54"}, children=[
+                    html.Span(f"👷 {rec}", style={"color": COLORES["text"], "fontSize": "13px"}),
+                    html.Span(f"S/ {val:.4f}", style={"color": COLORES["mod"],
+                               "fontWeight": "bold"}),
+                ]))
+            items.append(html.Div(style={"display": "flex", "justifyContent": "space-between",
+                                         "marginTop": "10px"}, children=[
+                html.Span("TOTAL MOD", style={"color": "#7A9BBF", "fontWeight": "bold"}),
+                html.Span(f"S/ {total_mod:.4f}", style={"color": COLORES["accent"],
+                           "fontWeight": "bold", "fontSize": "14px"}),
+            ]))
+            contenido = items
+        else:
+            contenido = [html.P("Sin datos de MOD para este período",
+                               style={"color": "#7A9BBF"})]
+
+    return SHOWN, titulo, subtitulo, contenido
 
 
 if __name__ == "__main__":
