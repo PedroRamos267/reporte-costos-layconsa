@@ -978,47 +978,46 @@ TAB_HISTORICO = html.Div(
         html.Div(id="h-kpis", style={"display": "flex", "gap": "15px",
                                       "flexWrap": "wrap", "marginBottom": "20px"}),
 
-        # Gráfico principal: apilado real + línea teórico
+        # Gráfico principal
         html.Div(style={"backgroundColor": COLORES["card"], "borderRadius": "12px",
                         "padding": "15px", "marginBottom": "20px"}, children=[
             html.H3("📈 Costo Unitario Real vs Teórico por Mes",
                     style={"color": COLORES["accent"], "fontSize": "15px", "marginTop": 0}),
-            html.P("💡 Haz click en una barra para ver el detalle de materiales",
+            html.P("💡 Click en una barra para ver el desglose por proceso",
                    style={"color": "#7A9BBF", "fontSize": "11px", "margin": "0 0 8px 0"}),
             dcc.Graph(id="h-grafico-apilado", figure=empty_fig()),
         ]),
 
-        # Modal detalle click
+        # ── Modal desglose por proceso ────────────────────────
         html.Div(id="h-modal-overlay", style={"display": "none"}, children=[
             html.Div(style={
                 "position": "fixed", "top": 0, "left": 0, "right": 0, "bottom": 0,
-                "backgroundColor": "rgba(0,0,0,0.7)", "zIndex": 9999,
+                "backgroundColor": "rgba(0,0,0,0.75)", "zIndex": 9999,
                 "display": "flex", "alignItems": "center", "justifyContent": "center",
-                "padding": "20px",
+                "padding": "16px",
             }, children=[
                 html.Div(style={
                     "backgroundColor": COLORES["card"], "borderRadius": "16px",
-                    "padding": "24px", "width": "100%", "maxWidth": "480px",
+                    "padding": "20px", "width": "100%", "maxWidth": "460px",
                     "border": "1px solid #2A3F54",
-                    "boxShadow": "0 20px 60px rgba(0,0,0,0.5)",
+                    "boxShadow": "0 20px 60px rgba(0,0,0,0.6)",
+                    "maxHeight": "85vh", "overflowY": "auto",
                 }, children=[
-                    # Header modal
                     html.Div(style={"display": "flex", "justifyContent": "space-between",
-                                    "alignItems": "center", "marginBottom": "16px"}, children=[
+                                    "alignItems": "flex-start", "marginBottom": "16px"}, children=[
                         html.Div(children=[
                             html.H3(id="h-modal-titulo",
                                     style={"color": COLORES["accent"], "margin": 0,
-                                           "fontSize": "16px"}),
+                                           "fontSize": "15px"}),
                             html.P(id="h-modal-subtitulo",
                                    style={"color": "#7A9BBF", "margin": "4px 0 0 0",
-                                          "fontSize": "12px"}),
+                                          "fontSize": "11px"}),
                         ]),
                         html.Button("✕", id="h-modal-cerrar", n_clicks=0,
                             style={"backgroundColor": "transparent", "color": "#7A9BBF",
-                                   "border": "none", "fontSize": "18px", "cursor": "pointer",
-                                   "padding": "0 4px"}),
+                                   "border": "none", "fontSize": "20px",
+                                   "cursor": "pointer", "lineHeight": "1"}),
                     ]),
-                    # Contenido dinámico
                     html.Div(id="h-modal-contenido"),
                 ])
             ])
@@ -1360,15 +1359,16 @@ def actualizar(codigo_pt, n_clicks, datos_simulador, datos_otros, datos_material
     tot_mod = df_pt[df_pt["Tipo de Costo"].str.startswith("MOD")]["Costo Unitario"].sum()
     tot_cif = df_pt[df_pt["Tipo de Costo"].str.startswith("CIF")]["Costo Unitario"].sum()
 
-    def kpi(titulo, valor, color):
+    def kpi(titulo, valor, color, sub=None):
         return html.Div(
             style={"backgroundColor": COLORES["card"], "borderLeft": f"4px solid {color}",
                    "borderRadius": "10px", "padding": "15px 20px",
                    "flex": "1", "minWidth": "160px"},
             children=[
                 html.P(titulo, style={"margin": 0, "fontSize": "12px", "color": "#7A9BBF"}),
-                html.H2(f"S/ {valor:.6f}",
-                        style={"margin": "5px 0 0 0", "color": color, "fontSize": "18px"}),
+                html.H2(valor, style={"margin": "5px 0 0 0", "color": color, "fontSize": "18px"}),
+                html.P(sub or "", style={"margin": "3px 0 0 0", "fontSize": "11px",
+                                         "color": "#7A9BBF"}),
             ]
         )
 
@@ -1725,9 +1725,12 @@ def actualizar(codigo_pt):
                 f"Período: {ultimo['Periodo']}"),
             kpi("📉 Desviación",        f"{desv_p:+.1f}%", color_desv,
                 f"S/ {desv_s:+,.6f}/und"),
-            kpi("🧱 CM Teórico",        f"S/ {cm_t:,.6f}",  COLORES["cm"]),
-            kpi("⚙️ CIF Teórico",       f"S/ {cif_t:,.6f}", COLORES["cif"]),
-            kpi("👷 MOD Teórico",       f"S/ {mod_t:,.6f}", COLORES["mod"]),
+            kpi("🧱 CM Teórico",  f"S/ {cm_t:,.6f}",  COLORES["cm"],
+                f"{cm_t/total_t*100:.1f}% del total" if total_t>0 else ""),
+            kpi("⚙️ CIF Teórico", f"S/ {cif_t:,.6f}", COLORES["cif"],
+                f"{cif_t/total_t*100:.1f}% del total" if total_t>0 else ""),
+            kpi("👷 MOD Teórico", f"S/ {mod_t:,.6f}", COLORES["mod"],
+                f"{mod_t/total_t*100:.1f}% del total" if total_t>0 else ""),
             kpi("📦 Vol. Total",         f"{vol_total:,.0f}", "#9C27B0", "unidades producidas"),
         ]
     else:
@@ -1744,30 +1747,35 @@ def actualizar(codigo_pt):
         cif_vals  = df_hist["CIF"].values
         mod_vals  = df_hist["MOD"].values
 
+        # customdata: [total, pct_cm, pct_cif, pct_mod] por periodo
+        cm_pcts  = [round(cm/t*100,1) if t>0 else 0 for cm,t in zip(cm_vals,totales)]
+        cif_pcts = [round(cif/t*100,1) if t>0 else 0 for cif,t in zip(cif_vals,totales)]
+        mod_pcts = [round(mod/t*100,1) if t>0 else 0 for mod,t in zip(mod_vals,totales)]
+
         fig_ap = go.Figure()
         fig_ap.add_trace(go.Bar(
             name="CM Real", x=periodos, y=cm_vals,
             marker_color=COLORES["cm"], opacity=0.85,
             text=[f"S/ {v:.4f}" for v in cm_vals],
             textposition="inside", textfont=dict(color="white", size=10),
-            hovertemplate="<b>CM</b>: S/ %{y:.4f}<br><i>Click para ver detalle</i><extra></extra>",
-            customdata=[[p, "CM"] for p in periodos],
+            customdata=list(zip([0]*len(periodos), cm_pcts)),
+            hovertemplate="<b>CM</b>: S/ %{y:.4f} (%{customdata[1]:.1f}%)<extra></extra>",
         ))
         fig_ap.add_trace(go.Bar(
             name="CIF Real", x=periodos, y=cif_vals,
             marker_color=COLORES["cif"], opacity=0.85,
             text=[f"S/ {v:.4f}" for v in cif_vals],
             textposition="inside", textfont=dict(color="white", size=10),
-            hovertemplate="<b>CIF</b>: S/ %{y:.4f}<br><i>Click para ver detalle</i><extra></extra>",
-            customdata=[[p, "CIF"] for p in periodos],
+            customdata=list(zip([1]*len(periodos), cif_pcts)),
+            hovertemplate="<b>CIF</b>: S/ %{y:.4f} (%{customdata[1]:.1f}%)<extra></extra>",
         ))
         fig_ap.add_trace(go.Bar(
             name="MOD Real", x=periodos, y=mod_vals,
             marker_color=COLORES["mod"], opacity=0.85,
             text=[f"S/ {v:.4f}" for v in mod_vals],
             textposition="inside", textfont=dict(color="white", size=10),
-            hovertemplate="<b>MOD</b>: S/ %{y:.4f}<br><i>Click para ver detalle</i><extra></extra>",
-            customdata=[[p, "MOD"] for p in periodos],
+            customdata=list(zip([2]*len(periodos), mod_pcts)),
+            hovertemplate="<b>MOD</b>: S/ %{y:.4f} (%{customdata[1]:.1f}%)<extra></extra>",
         ))
         # Traza invisible para mostrar total encima
         fig_ap.add_trace(go.Bar(
@@ -2070,147 +2078,179 @@ def descargar(n_clicks, codigo_pt):
 
 
 
-# ── Modal: detalle al hacer click en barra ───────────────────
+# ── Desglose por proceso — SAP recursivo ────────────────────
+def _clean_cod_h(x):
+    try: return str(int(float(str(x).strip())))
+    except: return str(x).strip()
+
+def _get_sap(cod, periodo):
+    sub = df_cubo[(df_cubo["Cod_PT"]==str(cod))&(df_cubo["Periodo"]==periodo)]
+    if sub.empty: return None
+    vol = sub[sub["TIPO_COSTO_DIR"]=="Volumen"]["VOL_PRODUCIDOS"].sum()
+    if vol == 0: return None
+    mats = sub[sub["TIPO_COSTO_DIR"]=="Materiales"].copy()
+    mats["_c"] = mats["Cod_Insumo"].apply(_clean_cod_h)
+    cm  = mats[~mats["_c"].str.startswith("231")]["COSTO_REAL"].sum() / vol
+    cif = sub[(sub["TIPO_COSTO_DIR"]=="Costo de Conversión")&
+              (sub["CLASE_COSTO"]=="Gastos Indirectos")]["COSTO_REAL"].sum() / vol
+    mod = sub[(sub["TIPO_COSTO_DIR"]=="Costo de Conversión")&
+              (sub["CLASE_COSTO"]=="Mano de obra directa")]["COSTO_REAL"].sum() / vol
+    semis = mats[mats["_c"].str.startswith("231")][["_c","CANT_REAL"]].copy()
+    semis["f"] = semis["CANT_REAL"] / vol
+    return {"cm":cm,"cif":cif,"mod":mod,"vol":vol,
+            "semis":semis[["_c","f"]].to_dict("records")}
+
+def _sap_fallback(cod, periodo, n=3):
+    r = _get_sap(cod, periodo)
+    if r: return r
+    idx = PERIODOS_ORDENADOS.index(periodo) if periodo in PERIODOS_ORDENADOS else -1
+    for p in reversed(PERIODOS_ORDENADOS[max(0,idx-n):idx]):
+        r = _get_sap(cod, p)
+        if r:
+            r["vol"] = 0
+            return r
+    return None
+
+def _desglose_recursivo(cod, periodo, factor, result, visited=None, depth=0):
+    if visited is None: visited = set()
+    if cod in visited or depth > 6: return
+    visited.add(cod)
+    r = _sap_fallback(cod, periodo)
+    if not r: return
+    t = df_tie[df_tie["Código Semi"]==str(cod)]
+    proc = str(t.iloc[0]["Proceso"]).strip() if not t.empty else "Otros"
+    if proc not in result:
+        result[proc] = {"CM": 0, "CIF": 0, "MOD": 0}
+    result[proc]["CM"]  += factor * r["cm"]
+    result[proc]["CIF"] += factor * r["cif"]
+    result[proc]["MOD"] += factor * r["mod"]
+    for s in r.get("semis", []):
+        _desglose_recursivo(s["_c"], periodo, factor * s["f"],
+                            result, visited.copy(), depth+1)
+
+def get_desglose_proceso(codigo_pt, periodo):
+    result = {}
+    _desglose_recursivo(str(codigo_pt), periodo, 1.0, result)
+    total = sum(v["CM"]+v["CIF"]+v["MOD"] for v in result.values())
+    return {k: {kk: round(vv, 6) for kk,vv in v.items()} for k,v in result.items()}, total
+
+
+# ── Modal: click en barra → desglose por proceso ─────────────
 @app.callback(
-    Output("h-modal-overlay",    "style"),
-    Output("h-modal-titulo",     "children"),
-    Output("h-modal-subtitulo",  "children"),
-    Output("h-modal-contenido",  "children"),
-    Input("h-grafico-apilado",   "clickData"),
-    Input("h-modal-cerrar",      "n_clicks"),
-    State("h-selector-pt",       "value"),
+    Output("h-modal-overlay",   "style"),
+    Output("h-modal-titulo",    "children"),
+    Output("h-modal-subtitulo", "children"),
+    Output("h-modal-contenido", "children"),
+    Input("h-grafico-apilado",  "clickData"),
+    Input("h-modal-cerrar",     "n_clicks"),
+    State("h-selector-pt",      "value"),
     prevent_initial_call=True,
 )
 def toggle_modal(clickData, n_cerrar, codigo_pt):
     from dash import callback_context
-    ctx = callback_context
+    ctx     = callback_context
     trigger = ctx.triggered[0]["prop_id"].split(".")[0] if ctx.triggered else ""
+    HIDDEN  = {"display": "none"}
+    SHOWN   = {"display": "block"}
 
-    HIDDEN = {"display": "none"}
-    SHOWN  = {"display": "block"}
-
-    if trigger == "h-modal-cerrar" or not clickData:
+    if trigger == "h-modal-cerrar" or not clickData or not codigo_pt:
         return HIDDEN, "", "", []
 
-    if not codigo_pt:
-        return HIDDEN, "", "", []
-
-    # Extraer periodo y driver del click
     point    = clickData["points"][0]
-    periodo  = point.get("x", "")
-    custom   = point.get("customdata", [None, None])
-    driver   = custom[1] if isinstance(custom, list) and len(custom) > 1 else "CM"
+    periodo  = str(point.get("x",""))[:7]
+    # Use customdata[0] which stores 0=CM,1=CIF,2=MOD explicitly
+    custom   = point.get("customdata", None)
+    if isinstance(custom, (list, tuple)) and len(custom) > 0:
+        idx_map = {0:"CM", 1:"CIF", 2:"MOD"}
+        try:
+            driver = idx_map.get(int(custom[0]), "CM")
+        except:
+            driver = ["CM","CIF","MOD"][point.get("curveNumber",0)] if point.get("curveNumber",0)<3 else "CM"
+    else:
+        curve  = point.get("curveNumber", 0)
+        driver = ["CM","CIF","MOD"][curve] if curve < 3 else "CM"
 
-    # Obtener descripción PT
     row_pt  = df_cubo[df_cubo["Cod_PT"]==str(codigo_pt)]
-    desc_pt = row_pt["Desc_PT"].iloc[0] if not row_pt.empty else codigo_pt
+    desc_pt = str(row_pt["Desc_PT"].iloc[0]) if not row_pt.empty else codigo_pt
 
-    titulo    = f"{'🧱 CM' if driver=='CM' else '⚙️ CIF' if driver=='CIF' else '👷 MOD'} — Detalle {periodo}"
-    subtitulo = f"{codigo_pt} · {desc_pt[:40]}"
+    try:
+        desglose, real_total = get_desglose_proceso(codigo_pt, periodo)
+    except Exception as e:
+        return SHOWN, "Error", str(e), [html.P(str(e), style={"color":"red"})]
 
-    # ── Materiales reales del PT en ese periodo (del cubo SAP) ──
-    sub = df_cubo[(df_cubo["Cod_PT"]==str(codigo_pt)) & (df_cubo["Periodo"]==periodo)]
-    vol = sub[sub["TIPO_COSTO_DIR"]=="Volumen"]["VOL_PRODUCIDOS"].sum()
+    if not desglose:
+        return SHOWN, f"Sin datos — {periodo}", desc_pt[:45], [
+            html.P("No hay datos SAP para este período", style={"color":"#7A9BBF"})]
 
-    if driver == "CM":
-        # Materiales consumidos con su costo unitario
-        mats = sub[sub["TIPO_COSTO_DIR"]=="Materiales"].copy()
-        if not mats.empty and vol > 0:
-            mats["Costo_Unit"] = mats["COSTO_REAL"] / vol
-            mats = mats[mats["Costo_Unit"] > 0].sort_values("Costo_Unit", ascending=False)
-            # Total CM
-            total_cm = mats["Costo_Unit"].sum()
-            items = []
-            for _, r in mats.head(10).iterrows():
-                desc  = str(r.get("Desc_Insumo", r.get("Cod_Insumo", "—")))[:35]
-                val   = r["Costo_Unit"]
-                pct   = val / total_cm * 100 if total_cm > 0 else 0
-                bar_w = f"{min(pct, 100):.0f}%"
-                items.append(html.Div(style={"marginBottom": "10px"}, children=[
-                    html.Div(style={"display": "flex", "justifyContent": "space-between",
-                                    "marginBottom": "3px"}, children=[
-                        html.Span(desc, style={"color": COLORES["text"], "fontSize": "12px"}),
-                        html.Span(f"S/ {val:.4f}", style={"color": COLORES["cm"],
-                                   "fontWeight": "bold", "fontSize": "12px"}),
-                    ]),
-                    html.Div(style={"backgroundColor": "#2A3F54", "borderRadius": "4px",
-                                    "height": "6px", "overflow": "hidden"}, children=[
-                        html.Div(style={"backgroundColor": COLORES["cm"], "height": "100%",
-                                        "width": bar_w, "borderRadius": "4px"})
-                    ]),
-                ]))
-            if len(mats) > 10:
-                resto = mats.iloc[10:]["Costo_Unit"].sum()
-                items.append(html.P(f"+ {len(mats)-10} materiales más: S/ {resto:.4f}",
-                    style={"color": "#7A9BBF", "fontSize": "11px", "marginTop": "8px"}))
-            items.append(html.Div(style={"borderTop": "1px solid #2A3F54",
-                                         "marginTop": "12px", "paddingTop": "10px",
-                                         "display": "flex", "justifyContent": "space-between"},
-                children=[
-                    html.Span("TOTAL CM", style={"color": "#7A9BBF", "fontWeight": "bold"}),
-                    html.Span(f"S/ {total_cm:.4f}", style={"color": COLORES["accent"],
-                               "fontWeight": "bold", "fontSize": "14px"}),
-                ]))
-            contenido = items
-        else:
-            contenido = [html.P("Sin datos de materiales para este período",
-                               style={"color": "#7A9BBF"})]
+    titulo  = f"📊 Costos por Proceso (aprox.) — {periodo}"
+    subtit  = f"{codigo_pt} · {desc_pt[:45]}"
+    col_map = {"CM":COLORES["cm"],"CIF":COLORES["cif"],"MOD":COLORES["mod"]}
+    total_driver = sum(v[driver] for v in desglose.values())
 
-    elif driver == "CIF":
-        conv = sub[(sub["TIPO_COSTO_DIR"]=="Costo de Conversión") &
-                   (sub["CLASE_COSTO"]=="Gastos Indirectos")].copy()
-        if not conv.empty and vol > 0:
-            total_cif = conv["COSTO_REAL"].sum() / vol
-            items = []
-            for _, r in conv.iterrows():
-                rec = str(r.get("COD_REC", "—"))
-                val = r["COSTO_REAL"] / vol
-                items.append(html.Div(style={"display": "flex", "justifyContent": "space-between",
-                                             "padding": "8px 0",
-                                             "borderBottom": "1px solid #2A3F54"}, children=[
-                    html.Span(f"⚙️ {rec}", style={"color": COLORES["text"], "fontSize": "13px"}),
-                    html.Span(f"S/ {val:.4f}", style={"color": COLORES["cif"],
-                               "fontWeight": "bold"}),
-                ]))
-            items.append(html.Div(style={"display": "flex", "justifyContent": "space-between",
-                                         "marginTop": "10px"}, children=[
-                html.Span("TOTAL CIF", style={"color": "#7A9BBF", "fontWeight": "bold"}),
-                html.Span(f"S/ {total_cif:.4f}", style={"color": COLORES["accent"],
-                           "fontWeight": "bold", "fontSize": "14px"}),
-            ]))
-            contenido = items
-        else:
-            contenido = [html.P("Sin datos de CIF para este período",
-                               style={"color": "#7A9BBF"})]
+    rows = []
+    # Header 3 columnas
+    cm_tot  = sum(v["CM"]  for v in desglose.values())
+    cif_tot = sum(v["CIF"] for v in desglose.values())
+    mod_tot = sum(v["MOD"] for v in desglose.values())
 
-    else:  # MOD
-        mod_data = sub[(sub["TIPO_COSTO_DIR"]=="Costo de Conversión") &
-                       (sub["CLASE_COSTO"]=="Mano de obra directa")].copy()
-        if not mod_data.empty and vol > 0:
-            total_mod = mod_data["COSTO_REAL"].sum() / vol
-            items = []
-            for _, r in mod_data.iterrows():
-                rec = str(r.get("COD_REC", "—"))
-                val = r["COSTO_REAL"] / vol
-                items.append(html.Div(style={"display": "flex", "justifyContent": "space-between",
-                                             "padding": "8px 0",
-                                             "borderBottom": "1px solid #2A3F54"}, children=[
-                    html.Span(f"👷 {rec}", style={"color": COLORES["text"], "fontSize": "13px"}),
-                    html.Span(f"S/ {val:.4f}", style={"color": COLORES["mod"],
-                               "fontWeight": "bold"}),
-                ]))
-            items.append(html.Div(style={"display": "flex", "justifyContent": "space-between",
-                                         "marginTop": "10px"}, children=[
-                html.Span("TOTAL MOD", style={"color": "#7A9BBF", "fontWeight": "bold"}),
-                html.Span(f"S/ {total_mod:.4f}", style={"color": COLORES["accent"],
-                           "fontWeight": "bold", "fontSize": "14px"}),
-            ]))
-            contenido = items
-        else:
-            contenido = [html.P("Sin datos de MOD para este período",
-                               style={"color": "#7A9BBF"})]
+    # Header 7 columnas: Proceso | CM | %CM | CIF | %CIF | MOD | %MOD
+    col_grid = "2fr repeat(6, auto)"
+    hdr_style = {"fontSize":"10px","fontWeight":"bold","textAlign":"right","padding":"0 2px"}
+    rows.append(html.Div(style={
+        "display":"grid","gridTemplateColumns":col_grid,
+        "gap":"4px","marginBottom":"6px",
+        "borderBottom":"1px solid #2A3F54","paddingBottom":"6px"
+    }, children=[
+        html.Span("Proceso",style={"color":"#7A9BBF","fontSize":"10px","fontWeight":"bold"}),
+        html.Span("CM",    style={**hdr_style,"color":COLORES["cm"]}),
+        html.Span("%CM",   style={**hdr_style,"color":COLORES["cm"],"opacity":"0.7"}),
+        html.Span("CIF",   style={**hdr_style,"color":COLORES["cif"]}),
+        html.Span("%CIF",  style={**hdr_style,"color":COLORES["cif"],"opacity":"0.7"}),
+        html.Span("MOD",   style={**hdr_style,"color":COLORES["mod"]}),
+        html.Span("%MOD",  style={**hdr_style,"color":COLORES["mod"],"opacity":"0.7"}),
+    ]))
 
-    return SHOWN, titulo, subtitulo, contenido
+    for proc in sorted(desglose.keys(), key=lambda p: -(desglose[p]["CM"]+desglose[p]["CIF"]+desglose[p]["MOD"])):
+        v = desglose[proc]
+        if v["CM"]+v["CIF"]+v["MOD"] <= 0: continue
+        pct_cm  = v["CM"]  / cm_tot  * 100 if cm_tot  > 0 else 0
+        pct_cif = v["CIF"] / cif_tot * 100 if cif_tot > 0 else 0
+        pct_mod = v["MOD"] / mod_tot * 100 if mod_tot > 0 else 0
+        val_style = {"fontSize":"11px","textAlign":"right","padding":"0 2px"}
+        pct_style = {"fontSize":"10px","textAlign":"right","padding":"0 2px","color":"#7A9BBF"}
+        rows.append(html.Div(style={
+            "display":"grid","gridTemplateColumns":col_grid,
+            "gap":"4px","padding":"5px 0",
+            "borderBottom":"1px solid #1A2633"
+        }, children=[
+            html.Span(proc, style={"color":COLORES["text"],"fontSize":"12px"}),
+            html.Span(f"{v['CM']:.4f}",    style={**val_style,"color":COLORES["cm"]}),
+            html.Span(f"{pct_cm:.0f}%",    style=pct_style),
+            html.Span(f"{v['CIF']:.4f}",   style={**val_style,"color":COLORES["cif"]}),
+            html.Span(f"{pct_cif:.0f}%",   style=pct_style),
+            html.Span(f"{v['MOD']:.4f}",   style={**val_style,"color":COLORES["mod"]}),
+            html.Span(f"{pct_mod:.0f}%",   style=pct_style),
+        ]))
+
+    # Totales
+    rows.append(html.Div(style={
+        "display":"grid","gridTemplateColumns":col_grid,
+        "gap":"4px","marginTop":"8px","paddingTop":"8px",
+        "borderTop":"1px solid #2A3F54"
+    }, children=[
+        html.Span("TOTAL", style={"color":"#7A9BBF","fontWeight":"bold","fontSize":"12px"}),
+        html.Span(f"{cm_tot:.4f}",  style={"color":COLORES["cm"], "fontWeight":"bold","fontSize":"12px","textAlign":"right"}),
+        html.Span("100%", style={"color":"#7A9BBF","fontSize":"10px","textAlign":"right"}),
+        html.Span(f"{cif_tot:.4f}", style={"color":COLORES["cif"],"fontWeight":"bold","fontSize":"12px","textAlign":"right"}),
+        html.Span("100%", style={"color":"#7A9BBF","fontSize":"10px","textAlign":"right"}),
+        html.Span(f"{mod_tot:.4f}", style={"color":COLORES["mod"],"fontWeight":"bold","fontSize":"12px","textAlign":"right"}),
+        html.Span("100%", style={"color":"#7A9BBF","fontSize":"10px","textAlign":"right"}),
+    ]))
+    rows.append(html.P(f"Total: S/ {real_total:.4f}",
+        style={"color":COLORES["accent"],"fontWeight":"bold",
+               "textAlign":"right","marginTop":"6px","fontSize":"14px"}))
+
+    return SHOWN, titulo, subtit, rows
 
 
 if __name__ == "__main__":
