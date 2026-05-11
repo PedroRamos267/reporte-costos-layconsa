@@ -562,7 +562,7 @@ def verificar_ip():
 import dash_auth
 
 VALID_USERNAME_PASSWORD_PAIRS = {
-    'pablo': '491iqwbCVOR',
+    'pablo': 'pmoncada20$',
     'admin': 'otro_password',
 }
 
